@@ -3,16 +3,15 @@ mod logger;
 
 use axum::http::Request;
 use axum::middleware::map_request;
-use axum::{routing::get, routing::post, Router, Server};
+use axum::{routing::post, Router, Server};
 //use hyper::server::Server;
 use hyperlocal::UnixServerExt;
 use std::sync::Arc;
-use std::sync::RwLock;
 
 const UNIX_SOCKET_PATH: &str = "/run/docker/plugins/logsqlite.sock";
 
 async fn normalize_dockerjson<B>(mut req: Request<B>) -> Request<B> {
-    let mut headers = req.headers_mut();
+    let headers = req.headers_mut();
     match headers.get("content-type") {
         Some(ct) => {
             println!("[normalize_dockerjson] {:?}", ct);
