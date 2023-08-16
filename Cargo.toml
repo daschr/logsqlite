@@ -1,0 +1,16 @@
+[package]
+name = "logsqlite"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = { version= "0.6.20", features= ["macros"]}
+serde_json = "1.0.105"
+serde = {version = "1.0.183", features = ["derive"]}
+hyperlocal = "0.8"
+hyper = "0.14.27"
+tokio = {version = "1.29.1", features = ["fs", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
+rusqlite = "0.29.0"
+chrono = "0.4.26"
