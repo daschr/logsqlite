@@ -7,6 +7,8 @@ edition = "2021"
 
 [dependencies]
 axum = { version= "0.6.20", features= ["macros"]}
+axum-streams = { version = "0.9", features=["json", "protobuf"] }
+futures = "0.3.28"
 serde_json = "1.0.105"
 serde = {version = "1.0.183", features = ["derive"]}
 hyperlocal = "0.8"

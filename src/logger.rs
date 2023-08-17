@@ -1,12 +1,17 @@
 use chrono::naive::NaiveDateTime;
 
-use rusqlite::{params, Connection, OpenFlags};
+use core::pin::Pin;
+use futures::{
+    future::join,
+    stream::Stream,
+    task::{Context, Poll},
+};
+use rusqlite::{params, Connection, OpenFlags, Rows, Statement, ToSql};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt};
-
 use tokio::time::timeout;
 
 use tokio;
@@ -19,7 +24,7 @@ fn get_ts() -> u64 {
 }
 
 pub struct Logger {
-    pub exit: RwLock<bool>,
+    exit: RwLock<bool>,
 }
 
 pub enum LoggerError {
@@ -58,23 +63,18 @@ impl Logger {
             match timeout(std::time::Duration::from_secs(3), reader.read_u32()).await {
                 Ok(Ok(v)) => {
                     msg_size = v as usize;
-                    println!("read msg_size: {}", msg_size);
                     break;
                 }
                 Ok(Err(_)) => {
-                    println!("could not parse u32, exiting...");
                     return Err(LoggerError::Exited);
                 }
                 Err(_) => {
                     if *self.exit.read().unwrap() {
-                        println!("timeout reached and exit is true, exiting...");
                         return Err(LoggerError::Exited);
                     }
                 }
             }
         }
-
-        println!("[read_protobuf] msg_size: {}", msg_size);
 
         let mut read = 0;
         let mut bf = [0u8; 256];
@@ -161,33 +161,92 @@ impl LoggerPool {
     }
 
     pub async fn stop_logging(&self, fifo_path: &str) {
-        println!("getting workers write");
-
         let res = self.workers.write().unwrap().remove(fifo_path);
-        println!("checking res");
+
         if let Some((logger, handle)) = res {
-            println!("exiting logger...");
             logger.exit();
             handle.await.ok();
         }
-        println!("logger exited.");
     }
+}
 
-    pub fn read_logs(&self, container_id: &str, since: Option<&str>, tail: Option<usize>) {
-        let ts = since.map(|s| {
-            NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-                .unwrap()
-                .timestamp()
-        });
+struct SqliteLogStream<'a> {
+    db_path: String,
+    parameters: Vec<Box<dyn ToSql>>,
+    cur_rowid: u64,
+    last_rowid: Option<u64>,
+}
 
-        let db_path = format!("{}/{}", self.dbs_path, container_id);
-        let ro_con = Connection::open_with_flags(
+impl<'a> SqliteLogStream<'a> {
+    fn new(
+        dbs_path: &str,
+        container_id: &str,
+        since: Option<&str>,
+        tail: Option<usize>,
+        follow: bool,
+    ) -> Result<Self, rusqlite::Error> {
+        let db_path = format!("{}/{}", dbs_path, container_id);
+        let con = Arc::new(Box::new(Connection::open_with_flags(
             &db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .expect("Could not open ro db connection");
+        )?));
+
+        let mut cur_rowid: u64 = 0;
+        let mut cond = String::from("WHERE ROWID >= ?1");
+        let mut parameters: Vec<Box<dyn ToSql>> = vec![cur_rowid];
+
+        if since.is_some() {
+            if let Ok(time) = NaiveDateTime::parse_from_str(since.unwrap(), "%Y-%m-%dT%H:%M:%S") {
+                let since = time.timestamp();
+
+                cond.push_str(" AND ts>=?2");
+                parameters.push(Box::new(since));
+            }
+        };
+
+        if tail.is_some() {
+            let tail = tail.unwrap();
+            let mut stmt = con.prepare(&format!("SELECT count(*) FROM logs {}", cond))?;
+
+            let nrows: usize = stmt.query_row(rusqlite::params_from_iter(&parameters), |r| {
+                r.get::<usize, usize>(1)
+            })?;
+
+            cond.push_str(&format!(
+                " LIMIT {} OFFSET {}",
+                tail,
+                if nrows > tail { nrows - tail } else { 0 }
+            ));
+        }
+
+        let stmt_s = format!("SELECT message FROM LOGS {}", cond);
+        println!("stmt_s: {}", &stmt_s);
+
+        let mut stmt = Arc::new(Box::new(con.clone().prepare(stmt_s.as_str())?));
+        let rows = Arc::new(Box::new(
+            stmt.clone()
+                .query(rusqlite::params_from_iter(&parameters))?,
+        ));
+
+        Ok(SqliteLogStream {
+            db_path,
+            con: con,
+            stmt: stmt,
+            rows: rows,
+            intitial_query_finished: false,
+            last_rowid: None,
+            follow,
+        })
+    }
+}
+
+impl<'a> Stream for SqliteLogStream<'a> {
+    type Item = Vec<u8>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(None)
     }
 }
