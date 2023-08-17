@@ -1,8 +1,12 @@
 use crate::logger::LoggerPool;
+use crate::logger::SqliteLogStream;
 
 use axum::debug_handler;
 use axum::extract::{Json, State};
 use axum::http::Uri;
+use axum::response::IntoResponse;
+
+use axum_streams::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -75,6 +79,7 @@ pub async fn stop_logging(
 }
 
 pub async fn capabilities() -> Json<Value> {
+    println!("[capabilities] called");
     json!({"ReadLogs": true}).into()
 }
 
@@ -96,9 +101,21 @@ pub struct ReadLogsConf {
 pub async fn read_logs(
     State(state): State<Arc<ApiState>>,
     Json(conf): Json<ReadLogsConf>,
-) -> Json<Value> {
+) -> Result<impl IntoResponse, Json<Value>> {
     println!("[read_logs] conf: {:?}", conf);
-    json!({"Err": "not implemented"}).into()
+
+    let logstream = match SqliteLogStream::new(
+        &state.logger_pool.dbs_path,
+        &conf.Info.ContainerID,
+        conf.ReadConfig.Since,
+        conf.ReadConfig.Tail,
+        conf.ReadConfig.Follow.unwrap_or(false),
+    ) {
+        Ok(l) => l,
+        Err(e) => return Err(json!({ "Err": format!("Could not read logs: {:?}", e) }).into()),
+    };
+
+    Ok(StreamBodyAs::protobuf(logstream))
 }
 
 pub async fn activate() -> Json<Value> {

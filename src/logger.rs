@@ -2,11 +2,10 @@ use chrono::naive::NaiveDateTime;
 
 use core::pin::Pin;
 use futures::{
-    future::join,
     stream::Stream,
     task::{Context, Poll},
 };
-use rusqlite::{params, Connection, OpenFlags, Rows, Statement, ToSql};
+use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -126,7 +125,7 @@ impl Logger {
 }
 
 pub struct LoggerPool {
-    dbs_path: String,
+    pub dbs_path: String,
     workers: RwLock<
         HashMap<
             String,
@@ -170,43 +169,47 @@ impl LoggerPool {
     }
 }
 
-struct SqliteLogStream<'a> {
+pub struct SqliteLogStream {
     db_path: String,
-    parameters: Vec<Box<dyn ToSql>>,
-    cur_rowid: u64,
-    last_rowid: Option<u64>,
+    stmt_s: String,
+    parameters: Vec<u64>,
+    next_rowid: u64,
+    counter: usize,
+    tail: Option<usize>,
 }
 
-impl<'a> SqliteLogStream<'a> {
-    fn new(
+impl SqliteLogStream {
+    pub fn new(
         dbs_path: &str,
         container_id: &str,
-        since: Option<&str>,
+        since: Option<String>,
         tail: Option<usize>,
         follow: bool,
     ) -> Result<Self, rusqlite::Error> {
         let db_path = format!("{}/{}", dbs_path, container_id);
-        let con = Arc::new(Box::new(Connection::open_with_flags(
+        let con = Connection::open_with_flags(
             &db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?));
+        )?;
 
-        let mut cur_rowid: u64 = 0;
         let mut cond = String::from("WHERE ROWID >= ?1");
-        let mut parameters: Vec<Box<dyn ToSql>> = vec![cur_rowid];
+        let mut parameters: Vec<u64> = vec![0];
 
         if since.is_some() {
-            if let Ok(time) = NaiveDateTime::parse_from_str(since.unwrap(), "%Y-%m-%dT%H:%M:%S") {
+            if let Ok(time) =
+                NaiveDateTime::parse_from_str(since.unwrap().as_str(), "%Y-%m-%dT%H:%M:%S")
+            {
                 let since = time.timestamp();
 
                 cond.push_str(" AND ts>=?2");
-                parameters.push(Box::new(since));
+                parameters.push(since as u64);
             }
         };
 
+        let mut first_rowid = 0u64;
         if tail.is_some() {
             let tail = tail.unwrap();
             let mut stmt = con.prepare(&format!("SELECT count(*) FROM logs {}", cond))?;
@@ -215,38 +218,65 @@ impl<'a> SqliteLogStream<'a> {
                 r.get::<usize, usize>(1)
             })?;
 
-            cond.push_str(&format!(
-                " LIMIT {} OFFSET {}",
-                tail,
-                if nrows > tail { nrows - tail } else { 0 }
-            ));
+            stmt = con.prepare(&format!("SELECT ROWID FROM logs {} OFFSET ?1", cond))?;
+
+            first_rowid = stmt.query_row([if nrows > tail { nrows - tail } else { 0 }], |r| {
+                r.get::<usize, u64>(1)
+            })?;
         }
 
-        let stmt_s = format!("SELECT message FROM LOGS {}", cond);
+        let stmt_s = format!("SELECT message FROM LOGS {} LIMIT 1", cond);
         println!("stmt_s: {}", &stmt_s);
-
-        let mut stmt = Arc::new(Box::new(con.clone().prepare(stmt_s.as_str())?));
-        let rows = Arc::new(Box::new(
-            stmt.clone()
-                .query(rusqlite::params_from_iter(&parameters))?,
-        ));
 
         Ok(SqliteLogStream {
             db_path,
-            con: con,
-            stmt: stmt,
-            rows: rows,
-            intitial_query_finished: false,
-            last_rowid: None,
-            follow,
+            stmt_s,
+            parameters,
+            next_rowid: first_rowid,
+            counter: 0,
+            tail: if follow { None } else { tail },
         })
     }
 }
 
-impl<'a> Stream for SqliteLogStream<'a> {
+impl<'a> Stream for SqliteLogStream {
     type Item = Vec<u8>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(None)
+    fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.tail.is_some() && self.counter >= self.tail.unwrap() {
+            return Poll::Ready(None);
+        }
+
+        self.parameters[0] = self.next_rowid;
+
+        let con = match Connection::open_with_flags(
+            &self.db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_URI
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(c) => c,
+            Err(_) => return Poll::Ready(None),
+        };
+
+        let mut stmt = match con.prepare(&self.stmt_s) {
+            Ok(s) => s,
+            Err(_) => return Poll::Ready(None),
+        };
+
+        let res: Option<Vec<u8>> = stmt
+            .query_row(rusqlite::params_from_iter(&self.parameters), |r| {
+                r.get::<usize, Vec<u8>>(1)
+            })
+            .ok();
+
+        if res.is_some() {
+            self.counter += 1;
+        }
+
+        self.next_rowid += 1;
+
+        Poll::Ready(res)
     }
 }
