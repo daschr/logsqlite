@@ -87,32 +87,49 @@ pub async fn capabilities() -> Json<Value> {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReadConfig {
     Since: Option<String>,
-    Tail: Option<usize>,
+    Until: Option<String>,
+    Tail: Option<i128>,
     Follow: Option<bool>,
 }
 
 #[allow(non_snake_case)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReadLogsConf {
-    ReadConfig: ReadConfig,
+    Config: ReadConfig,
     Info: Info,
 }
 
+/* Object {"Config": Object {"Follow": Bool(false), "Since": String("0001-01-01T00:00:00Z"),
+"Tail": Number(-1), "Until": String("0001-01-01T00:00:00Z")},
+"Info": Object {"Config": Object {}, "ContainerArgs": Array [], "ContainerCreated": String("2023-08-17T14:15:45.983205858Z"), "ContainerEntrypoint": String("bash"), "ContainerEnv": Array [String("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")], "ContainerID": String("71a33f78bc9b362c91de1746d54d8fea51a17bfddde1745c2f9fbfdb1e4d2b90"), "ContainerImageID": String("sha256:01f29b872827fa6f9aed0ea0b2ede53aea4ad9d66c7920e81a8db6d1fd9ab7f9"), "ContainerImageName": String("ubuntu"), "ContainerLabels": Object {"org.opencontainers.image.ref.name": String("ubuntu"), "org.opencontainers.image.version": String("22.04")}, "ContainerName": String("/wonderful_raman"), "DaemonName": String("docker"), "LogPath": String("")}}
+
+*/
 pub async fn read_logs(
     State(state): State<Arc<ApiState>>,
     Json(conf): Json<ReadLogsConf>,
 ) -> Result<impl IntoResponse, Json<Value>> {
     println!("[read_logs] conf: {:?}", conf);
 
+    let tail = match conf.Config.Tail {
+        Some(v) if v < 1 => None,
+        Some(v) => Some(v as usize),
+        None => None,
+    };
+
     let logstream = match SqliteLogStream::new(
         &state.logger_pool.dbs_path,
         &conf.Info.ContainerID,
-        conf.ReadConfig.Since,
-        conf.ReadConfig.Tail,
-        conf.ReadConfig.Follow.unwrap_or(false),
+        conf.Config.Since,
+        tail,
+        conf.Config.Follow.unwrap_or(false),
     ) {
         Ok(l) => l,
-        Err(e) => return Err(json!({ "Err": format!("Could not read logs: {:?}", e) }).into()),
+        Err(e) => {
+            eprintln!("Error creating logstream: {:?}", &e);
+            return Err(
+                json!({ "Err": format!("[logsqlite] Could not read logs: {:?}", e) }).into(),
+            );
+        }
     };
 
     Ok(StreamBodyAs::protobuf(logstream))

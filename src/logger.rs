@@ -169,6 +169,7 @@ impl LoggerPool {
     }
 }
 
+#[derive(Debug)]
 pub struct SqliteLogStream {
     db_path: String,
     stmt_s: String,
@@ -187,20 +188,20 @@ impl SqliteLogStream {
         follow: bool,
     ) -> Result<Self, rusqlite::Error> {
         let db_path = format!("{}/{}", dbs_path, container_id);
+        println!("db_path: {}", &db_path);
         let con = Connection::open_with_flags(
             &db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-
+        println!("db opened");
         let mut cond = String::from("WHERE ROWID >= ?1");
         let mut parameters: Vec<u64> = vec![0];
 
         if since.is_some() {
             if let Ok(time) =
-                NaiveDateTime::parse_from_str(since.unwrap().as_str(), "%Y-%m-%dT%H:%M:%S")
+                NaiveDateTime::parse_from_str(since.as_ref().unwrap().as_str(), "%Y-%m-%dT%H:%M:%S")
             {
                 let since = time.timestamp();
 
@@ -208,6 +209,8 @@ impl SqliteLogStream {
                 parameters.push(since as u64);
             }
         };
+
+        println!("Here: {:?}", &since);
 
         let mut first_rowid = 0u64;
         if tail.is_some() {
@@ -225,7 +228,7 @@ impl SqliteLogStream {
             })?;
         }
 
-        let stmt_s = format!("SELECT message FROM LOGS {} LIMIT 1", cond);
+        let stmt_s = format!("SELECT message FROM logs {} LIMIT 1", cond);
         println!("stmt_s: {}", &stmt_s);
 
         Ok(SqliteLogStream {
@@ -252,7 +255,6 @@ impl<'a> Stream for SqliteLogStream {
         let con = match Connection::open_with_flags(
             &self.db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_CREATE
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ) {
@@ -265,12 +267,18 @@ impl<'a> Stream for SqliteLogStream {
             Err(_) => return Poll::Ready(None),
         };
 
-        let res: Option<Vec<u8>> = stmt
+        let res: Option<Vec<u8>> = match stmt
             .query_row(rusqlite::params_from_iter(&self.parameters), |r| {
-                r.get::<usize, Vec<u8>>(1)
-            })
-            .ok();
+                r.get::<usize, Vec<u8>>(0)
+            }) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("query_row: {:?}", e);
+                None
+            }
+        };
 
+        println!("res: {:?}", &res);
         if res.is_some() {
             self.counter += 1;
         }
