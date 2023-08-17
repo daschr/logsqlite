@@ -80,7 +80,7 @@ pub async fn stop_logging(
 
 pub async fn capabilities() -> Json<Value> {
     println!("[capabilities] called");
-    json!({"ReadLogs": true}).into()
+    json!({"Cap": {"ReadLogs": true}}).into()
 }
 
 #[allow(non_snake_case)]
