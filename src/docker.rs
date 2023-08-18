@@ -6,7 +6,7 @@ use axum::extract::{Json, State};
 use axum::http::Uri;
 use axum::response::IntoResponse;
 
-use axum_streams::*;
+use crate::stream_body_as::StreamBodyAs;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;

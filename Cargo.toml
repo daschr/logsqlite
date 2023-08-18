@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 axum = { version= "0.6.20", features= ["macros"]}
-axum-streams = { version = "0.9", features=["json", "protobuf"] }
 futures = "0.3.28"
 serde_json = "1.0.105"
 serde = {version = "1.0.183", features = ["derive"]}
@@ -16,3 +15,7 @@ hyper = "0.14.27"
 tokio = {version = "1.29.1", features = ["fs", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
 rusqlite = "0.29.0"
 chrono = "0.4.26"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+prost = { version= "0.11" }
+http = "0.2"

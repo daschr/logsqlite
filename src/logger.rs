@@ -59,7 +59,7 @@ impl Logger {
         #[allow(unused_assignments)]
         let mut msg_size = 0usize;
         loop {
-            match timeout(std::time::Duration::from_secs(3), reader.read_u32()).await {
+            match timeout(std::time::Duration::from_millis(250), reader.read_u32()).await {
                 Ok(Ok(v)) => {
                     msg_size = v as usize;
                     break;
@@ -76,7 +76,7 @@ impl Logger {
         }
 
         let mut read = 0;
-        let mut bf = [0u8; 256];
+        let mut bf = [0u8; 10];
         msg.clear();
 
         while read < msg_size {
@@ -86,8 +86,9 @@ impl Logger {
                 msg_size - read
             };
             let read_bytes = reader.read(&mut bf[0..tbr]).await?;
+
             read += read_bytes;
-            msg.extend_from_slice(&bf[0..tbr]);
+            msg.extend_from_slice(&bf[0..read_bytes]);
         }
 
         Ok(())
@@ -195,7 +196,7 @@ impl SqliteLogStream {
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        println!("db opened");
+
         let mut cond = String::from("WHERE ROWID >= ?1");
         let mut parameters: Vec<u64> = vec![0];
 
@@ -210,22 +211,25 @@ impl SqliteLogStream {
             }
         };
 
-        println!("Here: {:?}", &since);
-
-        let mut first_rowid = 0u64;
+        let mut first_rowid = 1u64;
         if tail.is_some() {
             let tail = tail.unwrap();
             let mut stmt = con.prepare(&format!("SELECT count(*) FROM logs {}", cond))?;
 
             let nrows: usize = stmt.query_row(rusqlite::params_from_iter(&parameters), |r| {
-                r.get::<usize, usize>(1)
+                r.get::<usize, usize>(0)
             })?;
 
-            stmt = con.prepare(&format!("SELECT ROWID FROM logs {} OFFSET ?1", cond))?;
+            stmt = con.prepare(&format!(
+                "SELECT ROWID FROM logs {} LIMIT 1 OFFSET ?1",
+                cond
+            ))?;
 
             first_rowid = stmt.query_row([if nrows > tail { nrows - tail } else { 0 }], |r| {
-                r.get::<usize, u64>(1)
+                r.get::<usize, u64>(0)
             })?;
+
+            println!("first_rowid: {}", first_rowid);
         }
 
         let stmt_s = format!("SELECT message FROM logs {} LIMIT 1", cond);
@@ -267,18 +271,21 @@ impl<'a> Stream for SqliteLogStream {
             Err(_) => return Poll::Ready(None),
         };
 
-        let res: Option<Vec<u8>> = match stmt
+        let res: Option<Vec<u8>> = stmt
             .query_row(rusqlite::params_from_iter(&self.parameters), |r| {
                 r.get::<usize, Vec<u8>>(0)
-            }) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                eprintln!("query_row: {:?}", e);
-                None
-            }
-        };
+            })
+            .ok();
 
-        println!("res: {:?}", &res);
+        println!(
+            "res: {:?} [{}]",
+            &res,
+            if res.is_some() {
+                res.as_ref().unwrap().len()
+            } else {
+                0
+            }
+        );
         if res.is_some() {
             self.counter += 1;
         }
