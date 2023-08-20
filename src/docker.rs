@@ -1,12 +1,12 @@
 use crate::logger::LoggerPool;
 use crate::logger::SqliteLogStream;
 
+use crate::stream_body_as::StreamBodyAs;
+use axum::body::StreamBody;
 use axum::debug_handler;
 use axum::extract::{Json, State};
 use axum::http::Uri;
 use axum::response::IntoResponse;
-
-use crate::stream_body_as::StreamBodyAs;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -112,7 +112,7 @@ pub async fn read_logs(
 
     let tail = match conf.Config.Tail {
         Some(v) if v < 1 => None,
-        Some(v) => Some(v as usize),
+        Some(v) => Some(v as u64),
         None => None,
     };
 
@@ -132,7 +132,8 @@ pub async fn read_logs(
         }
     };
 
-    Ok(StreamBodyAs::protobuf(logstream))
+    Ok(StreamBody::new(logstream))
+    //Ok(StreamBodyAs::protobuf(logstream))
 }
 
 pub async fn activate() -> Json<Value> {

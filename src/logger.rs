@@ -2,7 +2,7 @@ use chrono::naive::NaiveDateTime;
 
 use core::pin::Pin;
 use futures::{
-    stream::Stream,
+    stream::{Stream, TryStream},
     task::{Context, Poll},
 };
 use rusqlite::{Connection, OpenFlags};
@@ -64,20 +64,24 @@ impl Logger {
                     msg_size = v as usize;
                     break;
                 }
-                Ok(Err(_)) => {
+                Ok(Err(e)) => {
+                    println!("[read_protobuf] Ok(Err({}))", e);
                     return Err(LoggerError::Exited);
                 }
-                Err(_) => {
+                Err(e) => {
+                    println!("[read_protobuf] Err({})", e);
                     if *self.exit.read().unwrap() {
                         return Err(LoggerError::Exited);
                     }
                 }
             }
         }
-
+        println!("[read_protobuf] msg_size: {}", msg_size);
         let mut read = 0;
         let mut bf = [0u8; 10];
         msg.clear();
+
+        msg.extend_from_slice(&(msg_size as u32).to_be_bytes());
 
         while read < msg_size {
             let tbr = if msg_size - read >= bf.len() {
@@ -91,6 +95,7 @@ impl Logger {
             msg.extend_from_slice(&bf[0..read_bytes]);
         }
 
+        println!("msg: {:?} [{}|{}]", &msg, msg.len(), msg_size);
         Ok(())
     }
 
@@ -106,11 +111,7 @@ impl Logger {
 
         let mut message: Vec<u8> = Vec::new();
 
-        while !*self.exit.read().unwrap() {
-            if let Err(_) = self.read_protobuf(&mut fd, &mut message).await {
-                return Ok(());
-            }
-
+        while let Ok(_) = self.read_protobuf(&mut fd, &mut message).await {
             dbcon.execute(
                 "INSERT INTO logs(ts, message) VALUES(?1, ?2)",
                 (get_ts(), &message),
@@ -176,8 +177,8 @@ pub struct SqliteLogStream {
     stmt_s: String,
     parameters: Vec<u64>,
     next_rowid: u64,
-    counter: usize,
-    tail: Option<usize>,
+    counter: u64,
+    tail: Option<u64>,
 }
 
 impl SqliteLogStream {
@@ -185,7 +186,7 @@ impl SqliteLogStream {
         dbs_path: &str,
         container_id: &str,
         since: Option<String>,
-        tail: Option<usize>,
+        tail: Option<u64>,
         follow: bool,
     ) -> Result<Self, rusqlite::Error> {
         let db_path = format!("{}/{}", dbs_path, container_id);
@@ -201,9 +202,10 @@ impl SqliteLogStream {
         let mut parameters: Vec<u64> = vec![0];
 
         if since.is_some() {
-            if let Ok(time) =
-                NaiveDateTime::parse_from_str(since.as_ref().unwrap().as_str(), "%Y-%m-%dT%H:%M:%S")
-            {
+            if let Ok(time) = NaiveDateTime::parse_from_str(
+                since.as_ref().unwrap().as_str(),
+                "%Y-%m-%dT%H:%M:%ST",
+            ) {
                 let since = time.timestamp();
 
                 cond.push_str(" AND ts>=?2");
@@ -216,19 +218,23 @@ impl SqliteLogStream {
             let tail = tail.unwrap();
             let mut stmt = con.prepare(&format!("SELECT count(*) FROM logs {}", cond))?;
 
-            let nrows: usize = stmt.query_row(rusqlite::params_from_iter(&parameters), |r| {
-                r.get::<usize, usize>(0)
-            })?;
-
-            stmt = con.prepare(&format!(
-                "SELECT ROWID FROM logs {} LIMIT 1 OFFSET ?1",
-                cond
-            ))?;
-
-            first_rowid = stmt.query_row([if nrows > tail { nrows - tail } else { 0 }], |r| {
+            let nrows: u64 = stmt.query_row(rusqlite::params_from_iter(&parameters), |r| {
                 r.get::<usize, u64>(0)
             })?;
 
+            let stmt_s = format!(
+                "SELECT ROWID FROM logs {} LIMIT 1 OFFSET ?{}",
+                cond,
+                parameters.len() + 1
+            );
+            println!("stmt_s: {}", &stmt_s);
+            stmt = con.prepare(&stmt_s)?;
+            println!("nrows: {}", nrows);
+            parameters.push(if nrows > tail { nrows - tail } else { 0 });
+            first_rowid = stmt.query_row(rusqlite::params_from_iter(&parameters), |r| {
+                r.get::<usize, u64>(0)
+            })?;
+            parameters.pop();
             println!("first_rowid: {}", first_rowid);
         }
 
@@ -247,7 +253,7 @@ impl SqliteLogStream {
 }
 
 impl<'a> Stream for SqliteLogStream {
-    type Item = Vec<u8>;
+    type Item = Result<Vec<u8>, &'static str>;
 
     fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.tail.is_some() && self.counter >= self.tail.unwrap() {
@@ -292,6 +298,9 @@ impl<'a> Stream for SqliteLogStream {
 
         self.next_rowid += 1;
 
-        Poll::Ready(res)
+        Poll::Ready(match res {
+            Some(r) => Some(Ok(r)),
+            None => None,
+        })
     }
 }

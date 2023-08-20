@@ -20,6 +20,14 @@ where
         &'a self,
         stream: BoxStream<'b, T>,
     ) -> BoxStream<'b, Result<axum::body::Bytes, axum::Error>> {
+        /*fn write_protobuf_record<T: prost::Message>(obj: T) -> Result<Vec<u8>, axum::Error> {
+            let v = Vec::new();
+            v.extend_from_slice(&(obj.len() as u32).to_be_bytes());
+            v.extend(obj);
+            println!("v: {:?}", &v);
+            Ok(v)
+        }*/
+
         fn write_protobuf_record<T>(obj: T) -> Result<Vec<u8>, axum::Error>
         where
             T: prost::Message,
@@ -34,7 +42,7 @@ where
             */
 
             frame_vec.extend(obj_vec);
-
+            println!("frame_vec: {:?}", &frame_vec);
             Ok(frame_vec)
         }
 
