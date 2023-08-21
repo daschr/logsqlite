@@ -4,8 +4,9 @@ mod logger;
 use axum::http::Request;
 use axum::middleware::map_request;
 use axum::{routing::post, Router, Server};
-//use hyper::server::Server;
+use docker::ApiState;
 use hyperlocal::UnixServerExt;
+use std::env;
 use std::sync::Arc;
 
 const UNIX_SOCKET_PATH: &str = "/run/docker/plugins/logsqlite.sock";
@@ -26,7 +27,9 @@ async fn normalize_dockerjson<B>(mut req: Request<B>) -> Request<B> {
 
 #[tokio::main]
 async fn main() {
-    let state = Arc::new(docker::ApiState::new());
+    let state = Arc::new(ApiState::new(
+        env::args().nth(1).unwrap_or("./dbs".to_string()),
+    ));
 
     let router = Router::new()
         .route("/LogDriver.StartLogging", post(docker::start_logging))

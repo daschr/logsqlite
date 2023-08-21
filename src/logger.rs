@@ -7,13 +7,12 @@ use futures::{
 };
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+
+use tokio;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::timeout;
-
-use tokio;
 
 fn get_ts() -> u64 {
     std::time::SystemTime::now()
@@ -29,6 +28,7 @@ pub struct Logger {
 pub enum LoggerError {
     IoError(std::io::Error),
     SqlError(rusqlite::Error),
+    JoinError(tokio::task::JoinError),
     Exited,
 }
 
@@ -41,6 +41,12 @@ impl From<std::io::Error> for LoggerError {
 impl From<rusqlite::Error> for LoggerError {
     fn from(e: rusqlite::Error) -> Self {
         LoggerError::SqlError(e)
+    }
+}
+
+impl From<tokio::task::JoinError> for LoggerError {
+    fn from(e: tokio::task::JoinError) -> Self {
+        LoggerError::JoinError(e)
     }
 }
 
@@ -145,9 +151,9 @@ pub struct LoggerPool {
 }
 
 impl LoggerPool {
-    pub fn new(dbs_path: &str) -> Self {
+    pub fn new(dbs_path: String) -> Self {
         LoggerPool {
-            dbs_path: dbs_path.to_string(),
+            dbs_path,
             workers: RwLock::new(HashMap::new()),
         }
     }
@@ -166,24 +172,26 @@ impl LoggerPool {
             .insert(fifo_path.to_string(), (logger.clone(), handle));
     }
 
-    pub async fn stop_logging(&self, fifo_path: &str) {
+    pub async fn stop_logging(&self, fifo_path: &str) -> Result<(), LoggerError> {
         let res = self.workers.write().unwrap().remove(fifo_path);
 
         if let Some((logger, handle)) = res {
             logger.exit();
-            handle.await.ok();
+            return handle.await?;
         }
+
+        Ok(())
     }
 }
 
 #[derive(Debug)]
 pub struct SqliteLogStream {
-    db_path: String,
     stmt_s: String,
     parameters: Vec<u64>,
     next_rowid: u64,
     counter: u64,
     tail: Option<u64>,
+    con: Pin<Box<RwLock<Connection>>>,
 }
 
 impl SqliteLogStream {
@@ -256,12 +264,12 @@ impl SqliteLogStream {
         println!("stmt_s: {}", &stmt_s);
 
         Ok(SqliteLogStream {
-            db_path,
             stmt_s,
             parameters,
             next_rowid: first_rowid,
             counter: 0,
             tail: if follow { None } else { tail },
+            con: Pin::new(Box::new(RwLock::new(con))),
         })
     }
 }
@@ -275,37 +283,32 @@ impl<'a> Stream for SqliteLogStream {
         }
 
         self.parameters[0] = self.next_rowid;
+        let res = {
+            let con = self.con.read().unwrap();
 
-        let con = match Connection::open_with_flags(
-            &self.db_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ) {
-            Ok(c) => c,
-            Err(_) => return Poll::Ready(None),
+            let mut stmt = match con.prepare(&self.stmt_s) {
+                Ok(s) => s,
+                Err(_) => return Poll::Ready(None),
+            };
+
+            let res: Option<Vec<u8>> = stmt
+                .query_row(rusqlite::params_from_iter(&self.parameters), |r| {
+                    r.get::<usize, Vec<u8>>(0)
+                })
+                .ok();
+
+            println!(
+                "[stream] {:?} [{}]",
+                res,
+                if res.is_some() {
+                    res.as_ref().unwrap().len()
+                } else {
+                    0
+                }
+            );
+
+            res
         };
-
-        let mut stmt = match con.prepare(&self.stmt_s) {
-            Ok(s) => s,
-            Err(_) => return Poll::Ready(None),
-        };
-
-        let res: Option<Vec<u8>> = stmt
-            .query_row(rusqlite::params_from_iter(&self.parameters), |r| {
-                r.get::<usize, Vec<u8>>(0)
-            })
-            .ok();
-
-        println!(
-            "[stream] {:?} [{}]",
-            res,
-            if res.is_some() {
-                res.as_ref().unwrap().len()
-            } else {
-                0
-            }
-        );
 
         if res.is_some() {
             self.counter += 1;

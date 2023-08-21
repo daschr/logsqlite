@@ -16,9 +16,9 @@ pub struct ApiState {
 }
 
 impl ApiState {
-    pub fn new() -> Self {
+    pub fn new(dbs_path: String) -> Self {
         ApiState {
-            logger_pool: LoggerPool::new("./dbs"),
+            logger_pool: LoggerPool::new(dbs_path),
         }
     }
 }
@@ -72,9 +72,13 @@ pub async fn stop_logging(
     Json(conf): Json<StopLoggingConf>,
 ) -> Json<Value> {
     println!("[stop_logging] conf: {:?}", conf);
-    state.logger_pool.stop_logging(&conf.File).await;
-    println!("stopped");
-    json!({"Err": ""}).into()
+    let s = state
+        .logger_pool
+        .stop_logging(&conf.File)
+        .await
+        .map_or(String::new(), |f| format!("{:?}", f));
+
+    json!({"Err": s}).into()
 }
 
 pub async fn capabilities() -> Json<Value> {
@@ -151,7 +155,6 @@ pub async fn read_logs(
     };
 
     Ok(StreamBody::new(logstream))
-    //Ok(StreamBodyAs::protobuf(logstream))
 }
 
 pub async fn activate() -> Json<Value> {
