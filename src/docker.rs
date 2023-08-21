@@ -1,7 +1,6 @@
 use crate::logger::LoggerPool;
 use crate::logger::SqliteLogStream;
 
-use crate::stream_body_as::StreamBodyAs;
 use axum::body::StreamBody;
 use axum::debug_handler;
 use axum::extract::{Json, State};

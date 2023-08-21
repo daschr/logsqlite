@@ -1,13 +1,6 @@
 mod docker;
 mod logger;
 
-#[path = "protobuf_stream/protobuf_format.rs"]
-mod protobuf_format;
-#[path = "protobuf_stream/stream_body_as.rs"]
-mod stream_body_as;
-#[path = "protobuf_stream/stream_format.rs"]
-mod stream_format;
-
 use axum::http::Request;
 use axum::middleware::map_request;
 use axum::{routing::post, Router, Server};

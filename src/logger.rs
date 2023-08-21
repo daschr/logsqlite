@@ -2,7 +2,7 @@ use chrono::naive::NaiveDateTime;
 
 use core::pin::Pin;
 use futures::{
-    stream::{Stream, TryStream},
+    stream::Stream,
     task::{Context, Poll},
 };
 use rusqlite::{Connection, OpenFlags};
