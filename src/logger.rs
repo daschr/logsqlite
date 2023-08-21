@@ -76,7 +76,7 @@ impl Logger {
                 }
             }
         }
-        println!("[read_protobuf] msg_size: {}", msg_size);
+
         let mut read = 0;
         let mut bf = [0u8; 10];
         msg.clear();
@@ -95,7 +95,12 @@ impl Logger {
             msg.extend_from_slice(&bf[0..read_bytes]);
         }
 
-        println!("msg: {:?} [{}|{}]", &msg, msg.len(), msg_size);
+        println!(
+            "[read_protobuf] msg: {:?} [{}|{}]",
+            &msg,
+            msg.len(),
+            msg_size
+        );
         Ok(())
     }
 
@@ -186,6 +191,7 @@ impl SqliteLogStream {
         dbs_path: &str,
         container_id: &str,
         since: Option<String>,
+        until: Option<String>,
         tail: Option<u64>,
         follow: bool,
     ) -> Result<Self, rusqlite::Error> {
@@ -202,14 +208,22 @@ impl SqliteLogStream {
         let mut parameters: Vec<u64> = vec![0];
 
         if since.is_some() {
-            if let Ok(time) = NaiveDateTime::parse_from_str(
-                since.as_ref().unwrap().as_str(),
-                "%Y-%m-%dT%H:%M:%ST",
-            ) {
+            if let Ok(time) = NaiveDateTime::parse_from_str(since.as_ref().unwrap().as_str(), "%+")
+            {
                 let since = time.timestamp();
 
-                cond.push_str(" AND ts>=?2");
+                cond.push_str(&format!(" AND ts>=?{}", parameters.len() + 1));
                 parameters.push(since as u64);
+            }
+        };
+
+        if until.is_some() {
+            if let Ok(time) = NaiveDateTime::parse_from_str(until.as_ref().unwrap().as_str(), "%+")
+            {
+                let until = time.timestamp();
+
+                cond.push_str(&format!(" AND ts<=?{}", parameters.len() + 1));
+                parameters.push(until as u64);
             }
         };
 
@@ -284,14 +298,15 @@ impl<'a> Stream for SqliteLogStream {
             .ok();
 
         println!(
-            "res: {:?} [{}]",
-            &res,
+            "[stream] {:?} [{}]",
+            res,
             if res.is_some() {
                 res.as_ref().unwrap().len()
             } else {
                 0
             }
         );
+
         if res.is_some() {
             self.counter += 1;
         }

@@ -105,7 +105,7 @@ pub struct ReadLogsConf {
 */
 pub async fn read_logs(
     State(state): State<Arc<ApiState>>,
-    Json(conf): Json<ReadLogsConf>,
+    Json(mut conf): Json<ReadLogsConf>,
 ) -> Result<impl IntoResponse, Json<Value>> {
     println!("[read_logs] conf: {:?}", conf);
 
@@ -115,10 +115,29 @@ pub async fn read_logs(
         None => None,
     };
 
+    if conf
+        .Config
+        .Since
+        .as_mut()
+        .is_some_and(|x| x == "0001-01-01T00:00:00Z")
+    {
+        conf.Config.Since = None;
+    }
+
+    if conf
+        .Config
+        .Until
+        .as_mut()
+        .is_some_and(|x| x == "0001-01-01T00:00:00Z")
+    {
+        conf.Config.Until = None;
+    }
+
     let logstream = match SqliteLogStream::new(
         &state.logger_pool.dbs_path,
         &conf.Info.ContainerID,
         conf.Config.Since,
+        conf.Config.Until,
         tail,
         conf.Config.Follow.unwrap_or(false),
     ) {
