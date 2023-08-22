@@ -1,4 +1,6 @@
-use chrono::naive::NaiveDateTime;
+use chrono::DateTime;
+
+use log::debug;
 
 use core::pin::Pin;
 use futures::{
@@ -20,14 +22,14 @@ use prost::Message;
 pub mod logentry {
     include!(concat!(env!("OUT_DIR"), "/docker.logentry.rs"));
 }
-
+/*
 fn get_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs()
 }
-
+*/
 pub struct Logger {
     exit: RwLock<bool>,
 }
@@ -82,7 +84,7 @@ impl Logger {
         &self,
         reader: &mut R,
         msg: &mut Vec<u8>,
-    ) -> Result<(), LoggerError> {
+    ) -> Result<u64, LoggerError> {
         #[allow(unused_assignments)]
         let mut msg_size = 0usize;
         loop {
@@ -91,10 +93,10 @@ impl Logger {
                     msg_size = v as usize;
                     break;
                 }
-                Ok(Err(e)) => {
+                Ok(Err(_)) => {
                     return Err(LoggerError::Exited);
                 }
-                Err(e) => {
+                Err(_) => {
                     if *self.exit.read().unwrap() {
                         return Err(LoggerError::Exited);
                     }
@@ -103,7 +105,7 @@ impl Logger {
         }
 
         let mut read = 0;
-        let mut bf = [0u8; 10];
+        let mut bf = [0u8; 1024];
         msg.clear();
 
         while read < msg_size {
@@ -118,15 +120,8 @@ impl Logger {
             msg.extend_from_slice(&bf[0..read_bytes]);
         }
 
-        println!(
-            "[read_protobuf] msg: {:?} [{}|{}]",
-            &msg,
-            msg.len(),
-            msg_size
-        );
-
         let mut dec_msg = logentry::LogEntry::decode(msg.as_slice())?;
-        println!("[read_protobuf] msg: {:?}", dec_msg);
+        debug!("[read_protobuf] msg: {:?}", dec_msg);
         dec_msg.line.push('\n' as u8);
 
         msg.clear();
@@ -134,7 +129,7 @@ impl Logger {
         msg.reserve(dec_msg.encoded_len());
         dec_msg.encode(msg)?;
 
-        Ok(())
+        Ok((dec_msg.time_nano as u64) / 1000_000_000u64)
     }
 
     async fn log(&self, fifo: String, db_path: String) -> Result<(), LoggerError> {
@@ -149,10 +144,10 @@ impl Logger {
 
         let mut message: Vec<u8> = Vec::new();
 
-        while let Ok(_) = self.read_protobuf(&mut fd, &mut message).await {
+        while let Ok(ts) = self.read_protobuf(&mut fd, &mut message).await {
             dbcon.execute(
                 "INSERT INTO logs(ts, message) VALUES(?1, ?2)",
-                (get_ts(), &message),
+                (ts, &message),
             )?;
         }
 
@@ -231,7 +226,7 @@ impl SqliteLogStream {
         follow: bool,
     ) -> Result<Self, rusqlite::Error> {
         let db_path = format!("{}/{}", dbs_path, container_id);
-        println!("db_path: {}", &db_path);
+        debug!("[SqliteLogStream] db_path: {}", &db_path);
         let con = Connection::open_with_flags(
             &db_path,
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -243,8 +238,7 @@ impl SqliteLogStream {
         let mut parameters: Vec<u64> = vec![0];
 
         if since.is_some() {
-            if let Ok(time) = NaiveDateTime::parse_from_str(since.as_ref().unwrap().as_str(), "%+")
-            {
+            if let Ok(time) = DateTime::parse_from_str(since.as_ref().unwrap().as_str(), "%+") {
                 let since = time.timestamp();
 
                 cond.push_str(&format!(" AND ts>=?{}", parameters.len() + 1));
@@ -253,8 +247,7 @@ impl SqliteLogStream {
         };
 
         if until.is_some() {
-            if let Ok(time) = NaiveDateTime::parse_from_str(until.as_ref().unwrap().as_str(), "%+")
-            {
+            if let Ok(time) = DateTime::parse_from_str(until.as_ref().unwrap().as_str(), "%+") {
                 let until = time.timestamp();
 
                 cond.push_str(&format!(" AND ts<=?{}", parameters.len() + 1));
@@ -265,7 +258,10 @@ impl SqliteLogStream {
         let mut first_rowid = 1u64;
         if tail.is_some() {
             let tail = tail.unwrap();
-            let mut stmt = con.prepare(&format!("SELECT count(*) FROM logs {}", cond))?;
+            let stmt_s = format!("SELECT count(*) FROM logs {}", cond);
+            debug!("stmt_s: {} params {:?}", stmt_s, &parameters);
+
+            let mut stmt = con.prepare(&stmt_s)?;
 
             let nrows: u64 = stmt.query_row(rusqlite::params_from_iter(&parameters), |r| {
                 r.get::<usize, u64>(0)
@@ -276,19 +272,19 @@ impl SqliteLogStream {
                 cond,
                 parameters.len() + 1
             );
-            println!("stmt_s: {}", &stmt_s);
+            debug!("stmt_s: {}", &stmt_s);
             stmt = con.prepare(&stmt_s)?;
-            println!("nrows: {}", nrows);
+            debug!("nrows: {}", nrows);
             parameters.push(if nrows > tail { nrows - tail } else { 0 });
             first_rowid = stmt.query_row(rusqlite::params_from_iter(&parameters), |r| {
                 r.get::<usize, u64>(0)
             })?;
             parameters.pop();
-            println!("first_rowid: {}", first_rowid);
+            debug!("first_rowid: {}", first_rowid);
         }
 
-        let stmt_s = format!("SELECT message FROM logs {} LIMIT 1", cond);
-        println!("stmt_s: {}", &stmt_s);
+        let stmt_s = format!("SELECT ROWID,message FROM logs {} LIMIT 1", cond);
+        debug!("stmt_s: {} params: {:?}", &stmt_s, &parameters);
 
         Ok(SqliteLogStream {
             stmt_s,
@@ -318,17 +314,19 @@ impl<'a> Stream for SqliteLogStream {
                 Err(_) => return Poll::Ready(None),
             };
 
-            let res: Option<Vec<u8>> = stmt
+            let res: Option<(u64, Vec<u8>)> = stmt
                 .query_row(rusqlite::params_from_iter(&self.parameters), |r| {
-                    r.get::<usize, Vec<u8>>(0)
+                    let rowid = r.get::<usize, u64>(0)?;
+                    let v = r.get::<usize, Vec<u8>>(1)?;
+                    Ok((rowid, v))
                 })
                 .ok();
 
-            println!(
+            debug!(
                 "[stream] {:?} [{}]",
                 res,
                 if res.is_some() {
-                    res.as_ref().unwrap().len()
+                    res.as_ref().unwrap().1.len()
                 } else {
                     0
                 }
@@ -339,12 +337,11 @@ impl<'a> Stream for SqliteLogStream {
 
         if res.is_some() {
             self.counter += 1;
+            self.next_rowid = res.as_ref().unwrap().0 + 1;
         }
 
-        self.next_rowid += 1;
-
         Poll::Ready(match res {
-            Some(r) => Some(Ok(r)),
+            Some((_, r)) => Some(Ok(r)),
             None => None,
         })
     }

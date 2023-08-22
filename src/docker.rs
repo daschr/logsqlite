@@ -6,6 +6,7 @@ use axum::debug_handler;
 use axum::extract::{Json, State};
 use axum::http::Uri;
 use axum::response::IntoResponse;
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -51,7 +52,7 @@ pub async fn start_logging(
     State(state): State<Arc<ApiState>>,
     Json(conf): Json<StartLoggingConf>,
 ) -> Json<Value> {
-    println!("[start_logging] conf: {:?}", conf);
+    info!("[start_logging] conf: {:?}", conf);
 
     state
         .logger_pool
@@ -71,7 +72,7 @@ pub async fn stop_logging(
     State(state): State<Arc<ApiState>>,
     Json(conf): Json<StopLoggingConf>,
 ) -> Json<Value> {
-    println!("[stop_logging] conf: {:?}", conf);
+    info!("[stop_logging] conf: {:?}", conf);
     let s = state
         .logger_pool
         .stop_logging(&conf.File)
@@ -82,7 +83,7 @@ pub async fn stop_logging(
 }
 
 pub async fn capabilities() -> Json<Value> {
-    println!("[capabilities] called");
+    debug!("[capabilities] called");
     json!({"Cap": {"ReadLogs": true}}).into()
 }
 
@@ -112,7 +113,7 @@ pub async fn read_logs(
     State(state): State<Arc<ApiState>>,
     Json(mut conf): Json<ReadLogsConf>,
 ) -> Result<impl IntoResponse, Json<Value>> {
-    println!("[read_logs] conf: {:?}", conf);
+    info!("[read_logs] conf: {:?}", conf);
 
     let tail = match conf.Config.Tail {
         Some(v) if v < 1 => None,
@@ -148,7 +149,7 @@ pub async fn read_logs(
     ) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Error creating logstream: {:?}", &e);
+            error!("Error creating logstream: {:?}", &e);
             return Err(
                 json!({ "Err": format!("[logsqlite] Could not read logs: {:?}", e) }).into(),
             );
@@ -159,11 +160,11 @@ pub async fn read_logs(
 }
 
 pub async fn activate() -> Json<Value> {
-    println!("activate called");
+    debug!("activate called");
     json!({"Implements": ["LogDriver"]}).into()
 }
 
 pub async fn fallback(uri: Uri) -> &'static str {
-    println!("[fallback] uri: {:?}", uri);
+    debug!("[fallback] uri: {:?}", uri);
     "not found"
 }

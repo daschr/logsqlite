@@ -19,6 +19,12 @@ bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 prost = { version= "0.11" }
 http = "0.2"
+log = "0.4"
+simple_logger = "4.2"
 
 [build-dependencies]
 prost-build = "0.5"
+
+[profile.release]
+lto=true
+strip=true

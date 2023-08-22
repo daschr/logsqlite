@@ -6,6 +6,8 @@ use axum::middleware::map_request;
 use axum::{routing::post, Router, Server};
 use docker::ApiState;
 use hyperlocal::UnixServerExt;
+use log::{self, debug};
+use simple_logger;
 use std::env;
 use std::sync::Arc;
 
@@ -15,7 +17,7 @@ async fn normalize_dockerjson<B>(mut req: Request<B>) -> Request<B> {
     let headers = req.headers_mut();
     match headers.get("content-type") {
         Some(ct) => {
-            println!("[normalize_dockerjson] {:?}", ct);
+            debug!("[normalize_dockerjson] {:?}", ct);
         }
         None => {
             headers.insert("content-type", "application/json".parse().unwrap());
@@ -27,6 +29,11 @@ async fn normalize_dockerjson<B>(mut req: Request<B>) -> Request<B> {
 
 #[tokio::main]
 async fn main() {
+    simple_logger::init_with_level(
+        env::var("DEBUG").map_or_else(|_| log::Level::Info, |_| log::Level::Debug),
+    )
+    .expect("could not set loglevel");
+
     let state = Arc::new(ApiState::new(
         env::args().nth(1).unwrap_or("./dbs".to_string()),
     ));
