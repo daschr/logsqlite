@@ -14,6 +14,13 @@ use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::timeout;
 
+use prost::Message;
+
+// Include the `items` module, which is generated from items.proto.
+pub mod logentry {
+    include!(concat!(env!("OUT_DIR"), "/docker.logentry.rs"));
+}
+
 fn get_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -29,6 +36,8 @@ pub enum LoggerError {
     IoError(std::io::Error),
     SqlError(rusqlite::Error),
     JoinError(tokio::task::JoinError),
+    DecodeError(prost::DecodeError),
+    EncodeError(prost::EncodeError),
     Exited,
 }
 
@@ -47,6 +56,18 @@ impl From<rusqlite::Error> for LoggerError {
 impl From<tokio::task::JoinError> for LoggerError {
     fn from(e: tokio::task::JoinError) -> Self {
         LoggerError::JoinError(e)
+    }
+}
+
+impl From<prost::DecodeError> for LoggerError {
+    fn from(e: prost::DecodeError) -> Self {
+        LoggerError::DecodeError(e)
+    }
+}
+
+impl From<prost::EncodeError> for LoggerError {
+    fn from(e: prost::EncodeError) -> Self {
+        LoggerError::EncodeError(e)
     }
 }
 
@@ -71,11 +92,9 @@ impl Logger {
                     break;
                 }
                 Ok(Err(e)) => {
-                    println!("[read_protobuf] Ok(Err({}))", e);
                     return Err(LoggerError::Exited);
                 }
                 Err(e) => {
-                    println!("[read_protobuf] Err({})", e);
                     if *self.exit.read().unwrap() {
                         return Err(LoggerError::Exited);
                     }
@@ -86,8 +105,6 @@ impl Logger {
         let mut read = 0;
         let mut bf = [0u8; 10];
         msg.clear();
-
-        msg.extend_from_slice(&(msg_size as u32).to_be_bytes());
 
         while read < msg_size {
             let tbr = if msg_size - read >= bf.len() {
@@ -107,6 +124,16 @@ impl Logger {
             msg.len(),
             msg_size
         );
+
+        let mut dec_msg = logentry::LogEntry::decode(msg.as_slice())?;
+        println!("[read_protobuf] msg: {:?}", dec_msg);
+        dec_msg.line.push('\n' as u8);
+
+        msg.clear();
+        msg.extend_from_slice(&(dec_msg.encoded_len() as u32).to_be_bytes());
+        msg.reserve(dec_msg.encoded_len());
+        dec_msg.encode(msg)?;
+
         Ok(())
     }
 
