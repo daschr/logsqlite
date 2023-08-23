@@ -214,7 +214,7 @@ pub struct SqliteLogStream {
     tail: Option<u64>,
     follow: bool,
     follow_counter: usize,
-    con: RwLock<Connection>,
+    con: Connection,
     waker: Option<JoinHandle<()>>,
 }
 
@@ -296,7 +296,7 @@ impl SqliteLogStream {
             tail: if follow { None } else { tail },
             follow,
             follow_counter: 0,
-            con: RwLock::new(con),
+            con,
             waker: None,
         })
     }
@@ -311,7 +311,7 @@ impl Drop for SqliteLogStream {
     }
 }
 
-impl<'a> Stream for SqliteLogStream {
+impl Stream for SqliteLogStream {
     type Item = Result<Vec<u8>, &'static str>;
 
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -321,9 +321,7 @@ impl<'a> Stream for SqliteLogStream {
 
         self.parameters[0] = self.next_rowid;
         let res = {
-            let con = self.con.read().unwrap();
-
-            let mut stmt = match con.prepare(&self.stmt_s) {
+            let mut stmt = match self.con.prepare(&self.stmt_s) {
                 Ok(s) => s,
                 Err(_) => return Poll::Ready(None),
             };
