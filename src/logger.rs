@@ -8,8 +8,8 @@ use futures::{
     task::{Context, Poll},
 };
 use rusqlite::{Connection, OpenFlags};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::{collections::HashMap, task::Waker};
 
 use prost::Message;
 use tokio::fs::File;
@@ -300,11 +300,6 @@ impl SqliteLogStream {
             waker: None,
         })
     }
-
-    async fn new_entry_waker(waker: Waker) {
-        sleep(Duration::from_secs(FOLLOW_WAKETIME)).await;
-        waker.wake();
-    }
 }
 
 impl Drop for SqliteLogStream {
@@ -365,9 +360,10 @@ impl<'a> Stream for SqliteLogStream {
             None if self.follow && self.follow_counter < FOLLOW_COUNTER_MAX => {
                 self.follow_counter += 1;
                 let waker = ctx.waker().clone();
-                self.waker = Some(tokio::spawn(
-                    async move { Self::new_entry_waker(waker).await },
-                ));
+                self.waker = Some(tokio::spawn(async move {
+                    sleep(Duration::from_secs(FOLLOW_WAKETIME)).await;
+                    waker.wake();
+                }));
 
                 Poll::Pending
             }
