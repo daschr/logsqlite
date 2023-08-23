@@ -8,28 +8,21 @@ use futures::{
     task::{Context, Poll},
 };
 use rusqlite::{Connection, OpenFlags};
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::{collections::HashMap, task::Waker};
 
-use tokio;
+use prost::Message;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::timeout;
-
-use prost::Message;
+use tokio::time::{sleep, Duration};
+use tokio::{self, task::JoinHandle};
 
 // Include the `items` module, which is generated from items.proto.
 pub mod logentry {
     include!(concat!(env!("OUT_DIR"), "/docker.logentry.rs"));
 }
-/*
-fn get_ts() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
-*/
+
 pub struct Logger {
     exit: RwLock<bool>,
 }
@@ -206,6 +199,12 @@ impl LoggerPool {
     }
 }
 
+// DIRTY WORKAROUND, since we cannot know if the client is disconnected
+// so that we can retun Poll::Ready(None) instant of Poll::Pending
+
+const FOLLOW_WAKETIME: u64 = 1;
+const FOLLOW_COUNTER_MAX: usize = 30;
+
 #[derive(Debug)]
 pub struct SqliteLogStream {
     stmt_s: String,
@@ -213,7 +212,10 @@ pub struct SqliteLogStream {
     next_rowid: u64,
     counter: u64,
     tail: Option<u64>,
-    con: Pin<Box<RwLock<Connection>>>,
+    follow: bool,
+    follow_counter: usize,
+    con: RwLock<Connection>,
+    waker: Option<JoinHandle<()>>,
 }
 
 impl SqliteLogStream {
@@ -292,15 +294,32 @@ impl SqliteLogStream {
             next_rowid: first_rowid,
             counter: 0,
             tail: if follow { None } else { tail },
-            con: Pin::new(Box::new(RwLock::new(con))),
+            follow,
+            follow_counter: 0,
+            con: RwLock::new(con),
+            waker: None,
         })
+    }
+
+    async fn new_entry_waker(waker: Waker) {
+        sleep(Duration::from_secs(FOLLOW_WAKETIME)).await;
+        waker.wake();
+    }
+}
+
+impl Drop for SqliteLogStream {
+    fn drop(&mut self) {
+        if let Some(waker) = self.waker.as_mut() {
+            debug!("aborting new_entry_waker");
+            waker.abort();
+        }
     }
 }
 
 impl<'a> Stream for SqliteLogStream {
     type Item = Result<Vec<u8>, &'static str>;
 
-    fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.tail.is_some() && self.counter >= self.tail.unwrap() {
             return Poll::Ready(None);
         }
@@ -337,12 +356,22 @@ impl<'a> Stream for SqliteLogStream {
 
         if res.is_some() {
             self.counter += 1;
+            self.follow_counter = 0;
             self.next_rowid = res.as_ref().unwrap().0 + 1;
         }
 
-        Poll::Ready(match res {
-            Some((_, r)) => Some(Ok(r)),
-            None => None,
-        })
+        match res {
+            Some((_, r)) => Poll::Ready(Some(Ok(r))),
+            None if self.follow && self.follow_counter < FOLLOW_COUNTER_MAX => {
+                self.follow_counter += 1;
+                let waker = ctx.waker().clone();
+                self.waker = Some(tokio::spawn(
+                    async move { Self::new_entry_waker(waker).await },
+                ));
+
+                Poll::Pending
+            }
+            None => Poll::Ready(None),
+        }
     }
 }
