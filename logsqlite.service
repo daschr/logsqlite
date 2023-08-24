@@ -1,0 +1,17 @@
+[Unit]
+Description=Moby/Docker logdriver for logging into sqlite databases
+
+[Service]
+Type=simple
+User=root
+Group=root
+Restart=always
+#RemainAfterExit=no
+#Environment="DEBUG=true"
+WorkingDirectory=/var/spool/logsqlite/
+ExecStartPre=-rm /var/run/docker/plugins/logsqlite.sock
+ExecStart=/usr/local/bin/logsqlite ./
+#StandardOutput=null
+
+[Install]
+WantedBy=multi-user.target
