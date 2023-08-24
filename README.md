@@ -1,4 +1,4 @@
-# logsqlite
+# logsqlite \***BETA, testers welcome**\*  
 Moby/Docker logging driver plugin which uses sqlite3 databases.
 
 Allows **faster** querying of logs (f.e using `docker logs --since/--until`) than the default JSON File logging driver
