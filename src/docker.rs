@@ -1,3 +1,4 @@
+use crate::cleaner::LogCleaner;
 use crate::logger::LoggerPool;
 use crate::logger::SqliteLogStream;
 
@@ -13,13 +14,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct ApiState {
-    logger_pool: LoggerPool,
+    pub logger_pool: LoggerPool,
+    pub cleaner: Option<LogCleaner>,
 }
 
 impl ApiState {
-    pub fn new(dbs_path: String) -> Self {
+    pub fn new(dbs_path: String, with_cleaner: bool) -> Self {
         ApiState {
-            logger_pool: LoggerPool::new(dbs_path),
+            logger_pool: LoggerPool::new(dbs_path.clone()),
+            cleaner: if with_cleaner {
+                Some(LogCleaner::new(dbs_path))
+            } else {
+                None
+            },
         }
     }
 }
@@ -54,6 +61,14 @@ pub async fn start_logging(
 ) -> Json<Value> {
     info!("[start_logging] conf: {:?}", conf);
 
+    if state.cleaner.is_some() {
+        state
+            .cleaner
+            .as_ref()
+            .unwrap()
+            .add(&conf.Info.ContainerID, &conf.File);
+    }
+
     state
         .logger_pool
         .start_logging(&conf.Info.ContainerID, &conf.File);
@@ -73,6 +88,11 @@ pub async fn stop_logging(
     Json(conf): Json<StopLoggingConf>,
 ) -> Json<Value> {
     info!("[stop_logging] conf: {:?}", conf);
+
+    if state.cleaner.is_some() {
+        state.cleaner.as_ref().unwrap().remove(&conf.File);
+    }
+
     let s = state
         .logger_pool
         .stop_logging(&conf.File)

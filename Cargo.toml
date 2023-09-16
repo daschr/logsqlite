@@ -21,6 +21,7 @@ prost = { version= "0.11" }
 http = "0.2"
 log = "0.4"
 simple_logger = "4.2"
+configparser = "3.0"
 
 [build-dependencies]
 prost-build = "0.5"
