@@ -66,7 +66,7 @@ impl TryFrom<ConfigSource<String>> for Config {
             databases_dir: get_dir(&config, "general", "databases_dir", "/var/spool/logsqlite/")?,
             cleanup_age: config
                 .getuint("general", "cleanup_age")?
-                .map(|s| Duration::from_secs(s)),
+                .map(Duration::from_secs),
         };
 
         Ok(c)

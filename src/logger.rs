@@ -115,14 +115,14 @@ impl Logger {
 
         let mut dec_msg = logentry::LogEntry::decode(msg.as_slice())?;
         debug!("[read_protobuf] msg: {:?}", dec_msg);
-        dec_msg.line.push('\n' as u8);
+        dec_msg.line.push(b'\n');
 
         msg.clear();
         msg.extend_from_slice(&(dec_msg.encoded_len() as u32).to_be_bytes());
         msg.reserve(dec_msg.encoded_len());
         dec_msg.encode(msg)?;
 
-        Ok((dec_msg.time_nano as u64) / 1000_000_000u64)
+        Ok((dec_msg.time_nano as u64) / 1_000_000_000_u64)
     }
 
     async fn log(&self, fifo: String, db_path: String) -> Result<(), LoggerError> {
@@ -258,8 +258,7 @@ impl SqliteLogStream {
         };
 
         let mut first_rowid = 1u64;
-        if tail.is_some() {
-            let tail = tail.unwrap();
+        if let Some(tail) = tail {
             let stmt_s = format!("SELECT count(*) FROM logs {}", cond);
             debug!("stmt_s: {} params {:?}", stmt_s, &parameters);
 

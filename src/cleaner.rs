@@ -29,7 +29,7 @@ impl LogCleaner {
         let mut map = self.containers.write().unwrap();
 
         if let Some(v) = map.get_mut(container_id) {
-            *v = *v + 1;
+            *v += 1;
         } else {
             map.insert(container_id.to_string(), 1usize);
         }
@@ -45,7 +45,7 @@ impl LogCleaner {
 
         if let Some(v) = map.get_mut(&container_id) {
             if *v > 1 {
-                *v = *v - 1;
+                *v -= 1;
                 return;
             }
         }
