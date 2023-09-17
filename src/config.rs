@@ -62,8 +62,13 @@ impl TryFrom<ConfigSource<String>> for Config {
         };
 
         let c = Config {
-            unix_socket_path: get_dir(&config, "general", "plugins_dir", "/run/docker/plugins/")?
-                .join("logsqlite.sock"),
+            unix_socket_path: get_dir(
+                &config,
+                "general",
+                "plugins_dir",
+                "/var/run/docker/plugins/",
+            )?
+            .join("logsqlite.sock"),
             databases_dir: get_dir(&config, "general", "databases_dir", "/var/spool/logsqlite/")?,
             cleanup_age: config.getuint("cleanup", "age")?.map(Duration::from_secs),
             cleanup_interval: config

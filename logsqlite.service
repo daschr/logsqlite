@@ -10,7 +10,7 @@ Restart=always
 #Environment="DEBUG=true"
 WorkingDirectory=/var/spool/logsqlite/
 ExecStartPre=-rm /var/run/docker/plugins/logsqlite.sock
-ExecStart=/usr/local/bin/logsqlite ./
+ExecStart=/usr/local/bin/logsqlite /etc/logsqlite/conf.ini
 #StandardOutput=null
 
 [Install]
