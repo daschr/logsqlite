@@ -1,13 +1,20 @@
-# logsqlite \***BETA, testers welcome**\*  
+# logsqlite 
 Moby/Docker logging driver plugin which uses sqlite3 databases.
 
 Allows **faster** querying of logs (f.e using `docker logs --since/--until`) than the default JSON File logging driver
 
+# Building
+* `cargo b --release`
+
 # Installation (systemd)
-1. `cargo b --release`
-2. `cp logsqlite.service /etc/systemd/system/ && systemctl daemon-reload`
-3. `mkdir /var/spool/logsqlite/`
-4. `systemctl start logsqlite`
+1. `cp logsqlite /usr/local/bin/`
+2. `mkdir /etc/logsqlite && cp conf.ini /etc/logsqlite/`
+3. `cp logsqlite.service /etc/systemd/system/ && systemctl daemon-reload`
+4. `mkdir /var/spool/logsqlite/`
+5. `systemctl enable logsqlite && systemctl start logsqlite`
+
+# Configuration
+See `conf.ini`
 
 # Using the driver
 - as the default logging driver:
