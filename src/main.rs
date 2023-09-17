@@ -59,7 +59,7 @@ async fn main() -> Result<(), config::ParsingError> {
                 debug!("[cleanup] running...");
                 c.cleanup(c_a).ok();
                 debug!("[cleanup] sleeping...");
-                time::sleep(time::Duration::from_secs(15 * 60)).await;
+                time::sleep(time::Duration::from_secs(conf.cleanup_interval.as_secs())).await;
             }
         });
     }

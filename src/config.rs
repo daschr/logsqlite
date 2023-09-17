@@ -7,6 +7,7 @@ pub struct Config {
     pub unix_socket_path: PathBuf,
     pub databases_dir: PathBuf,
     pub cleanup_age: Option<Duration>,
+    pub cleanup_interval: Duration,
 }
 
 #[allow(unused)]
@@ -64,9 +65,11 @@ impl TryFrom<ConfigSource<String>> for Config {
             unix_socket_path: get_dir(&config, "general", "plugins_dir", "/run/docker/plugins/")?
                 .join("logsqlite.sock"),
             databases_dir: get_dir(&config, "general", "databases_dir", "/var/spool/logsqlite/")?,
-            cleanup_age: config
-                .getuint("general", "cleanup_age")?
-                .map(Duration::from_secs),
+            cleanup_age: config.getuint("cleanup", "age")?.map(Duration::from_secs),
+            cleanup_interval: config
+                .getuint("cleanup", "interval")?
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(30 * 60)),
         };
 
         Ok(c)
