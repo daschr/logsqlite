@@ -51,6 +51,37 @@ fn get_dir<T: Into<PathBuf>>(
     }
 }
 
+fn parse_as_duration(v: &str) -> Result<Duration, String> {
+    let pos = {
+        let mut r = 0;
+        for c in v.chars() {
+            if !c.is_ascii_digit() {
+                break;
+            }
+            r += 1;
+        }
+        r
+    };
+
+    if pos == 0 {
+        return Err(String::from("Cannot parse time: no number"));
+    }
+
+    let mut num: u64 = v[0..pos].parse::<u64>().unwrap();
+    match &v[pos..] {
+        "w" | "W" => num *= 7 * 24 * 60 * 60,
+        "d" | "D" => num *= 24 * 60 * 60,
+        "h" | "H" => num *= 60 * 60,
+        "m" | "M" => num *= 60,
+        "s" | "S" => (),
+        s => {
+            return Err(format!("Unknown time specifier \"{}\"", s));
+        }
+    }
+
+    Ok(Duration::from_secs(num))
+}
+
 impl TryFrom<ConfigSource<String>> for Config {
     type Error = ParsingError;
 
@@ -70,7 +101,10 @@ impl TryFrom<ConfigSource<String>> for Config {
             )?
             .join("logsqlite.sock"),
             databases_dir: get_dir(&config, "general", "databases_dir", "/var/spool/logsqlite/")?,
-            cleanup_age: config.getuint("cleanup", "age")?.map(Duration::from_secs),
+            cleanup_age: match config.get("cleanup", "age") {
+                Some(s) => Some(parse_as_duration(s.as_str())?),
+                None => None,
+            },
             cleanup_interval: config
                 .getuint("cleanup", "interval")?
                 .map(Duration::from_secs)

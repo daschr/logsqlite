@@ -9,7 +9,6 @@ use axum::{routing::post, Router, Server};
 use docker::ApiState;
 use hyperlocal::UnixServerExt;
 use log::{self, debug};
-use simple_logger;
 use std::env;
 use std::sync::Arc;
 use tokio::{task, time};
