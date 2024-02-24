@@ -203,7 +203,7 @@ impl LoggerPool {
 // so that we can retun Poll::Ready(None) instant of Poll::Pending
 
 const FOLLOW_WAKETIME: u64 = 1;
-const FOLLOW_COUNTER_MAX: usize = 30;
+const FOLLOW_COUNTER_MAX: usize = 60 * 60;
 
 #[derive(Debug)]
 pub struct SqliteLogStream {
