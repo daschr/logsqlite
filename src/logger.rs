@@ -1,6 +1,6 @@
 use chrono::DateTime;
 
-use log::debug;
+use log::{debug, error};
 
 use core::pin::Pin;
 use futures::{
@@ -27,6 +27,7 @@ pub struct Logger {
     exit: RwLock<bool>,
 }
 
+#[derive(Debug)]
 pub enum LoggerError {
     IoError(std::io::Error),
     SqlError(rusqlite::Error),
@@ -81,13 +82,14 @@ impl Logger {
         #[allow(unused_assignments)]
         let mut msg_size = 0usize;
         loop {
-            match timeout(std::time::Duration::from_millis(250), reader.read_u32()).await {
+            match timeout(std::time::Duration::from_millis(10), reader.read_u32()).await {
                 Ok(Ok(v)) => {
                     msg_size = v as usize;
                     break;
                 }
-                Ok(Err(_)) => {
-                    return Err(LoggerError::Exited);
+                Ok(Err(e)) => {
+                    // this is some serious error and we cannot continue, the fifo may be closed
+                    return Err(e.into());
                 }
                 Err(_) => {
                     if *self.exit.read().unwrap() {
@@ -137,11 +139,19 @@ impl Logger {
 
         let mut message: Vec<u8> = Vec::new();
 
-        while let Ok(ts) = self.read_protobuf(&mut fd, &mut message).await {
-            dbcon.execute(
-                "INSERT INTO logs(ts, message) VALUES(?1, ?2)",
-                (ts, &message),
-            )?;
+        while !*self.exit.read().unwrap() {
+            match self.read_protobuf(&mut fd, &mut message).await {
+                Ok(ts) => {
+                    dbcon.execute(
+                        "INSERT INTO logs(ts, message) VALUES(?1, ?2)",
+                        (ts, &message),
+                    )?;
+                }
+                Err(e) => {
+                    error!("Failed to read a protobuf message: {:?}", e);
+                    return Err(e);
+                }
+            }
         }
 
         Ok(())
