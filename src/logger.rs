@@ -4,20 +4,22 @@ use log::{debug, error, info};
 
 use core::pin::Pin;
 use futures::{
+    executor::block_on,
     stream::Stream,
     task::{Context, Poll},
 };
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, SqliteConnection};
-use std::{cell::UnsafeCell, sync::Arc};
-use std::{collections::HashMap, str::FromStr};
+use std::{cell::UnsafeCell, collections::HashMap, str::FromStr, sync::Arc};
 
 use prost::Message;
-use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::sync::RwLock;
-use tokio::time::timeout;
-use tokio::time::{sleep, Duration};
-use tokio::{self, task::JoinHandle};
+use tokio::{
+    self,
+    fs::File,
+    io::{AsyncRead, AsyncReadExt},
+    sync::RwLock,
+    task::JoinHandle,
+    time::{sleep, timeout, Duration, Instant},
+};
 
 // Include the `items` module, which is generated from items.proto.
 pub mod logentry {
@@ -145,7 +147,8 @@ impl Logger {
             .execute(&mut dbcon)
             .await?;
 
-        let mut n_entries = 0;
+        let mut no_entries_ts = Instant::now();
+        let mut nb_entries = 0;
         while !*self.exit.read().await {
             debug!("read_protobuf from {}...", fifo.as_str());
             match self.read_protobuf(&mut fd, &mut message).await {
@@ -157,17 +160,24 @@ impl Logger {
                         .execute(&mut dbcon)
                         .await?;
 
-                    n_entries += 1;
+                    nb_entries += 1;
 
-                    if n_entries >= ENTRIES_BATCH_SIZE {
-                        info!(
-                            "reached {} entries, ending current transacion",
-                            ENTRIES_BATCH_SIZE
-                        );
+                    if nb_entries >= ENTRIES_BATCH_SIZE {
                         sqlx::query("END TRANSACTION;BEGIN TRANSACTION;")
                             .execute(&mut dbcon)
                             .await?;
-                        n_entries = 0;
+
+                        info!(
+                            "reached {} entries, ending current transacion {:.2} lines/s",
+                            ENTRIES_BATCH_SIZE,
+                            nb_entries as f64
+                                * (1_000_000f64
+                                    / Instant::now().duration_since(no_entries_ts).as_micros()
+                                        as f64)
+                        );
+
+                        no_entries_ts = Instant::now();
+                        nb_entries = 0;
                     }
                 }
                 Ok(None) => {
@@ -347,15 +357,6 @@ impl SqliteLogStream {
     }
 }
 
-impl Drop for SqliteLogStream {
-    fn drop(&mut self) {
-        if let Some(waker) = self.waker.as_mut() {
-            debug!("aborting new_entry_waker");
-            waker.abort();
-        }
-    }
-}
-
 impl Stream for SqliteLogStream {
     type Item = Result<Vec<u8>, &'static str>;
 
@@ -372,29 +373,16 @@ impl Stream for SqliteLogStream {
                 stmt = stmt.bind(*param as i64);
             }
 
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    error!("Failed to create single-threaded runtime: {:?}", e);
-                    return Poll::Ready(None);
-                }
-            };
+            let res: Option<(i64, Vec<u8>)> =
+                match block_on(stmt.fetch_one(unsafe { &mut *self.con.get() })) {
+                    Ok(s) => Some(s),
+                    Err(sqlx::Error::RowNotFound) => None,
+                    Err(e) => {
+                        error!("Got SQL error: {:?}", e);
+                        return Poll::Ready(None);
+                    }
+                };
 
-            let res: Option<(i64, Vec<u8>)> = rt
-                .block_on(stmt.fetch_one(unsafe { &mut *self.con.get() }))
-                .ok();
-
-            /*let res: Option<(u64, Vec<u8>)> = stmt
-                            .query_row(rusqlite::params_from_iter(&self.parameters), |r| {
-                                let rowid = r.get::<usize, u64>(0)?;
-                                let v = r.get::<usize, Vec<u8>>(1)?;
-                                Ok((rowid, v))
-                            })
-                            .ok();
-            */
             debug!(
                 "[stream] {:?} [{}]",
                 res,
@@ -427,6 +415,15 @@ impl Stream for SqliteLogStream {
                 Poll::Pending
             }
             None => Poll::Ready(None),
+        }
+    }
+}
+
+impl Drop for SqliteLogStream {
+    fn drop(&mut self) {
+        if let Some(waker) = self.waker.as_mut() {
+            debug!("aborting new_entry_waker");
+            waker.abort();
         }
     }
 }
