@@ -1,8 +1,9 @@
 use log::debug;
-use rusqlite::{Connection, OpenFlags};
+use sqlx::{Connection, SqliteConnection};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct LogCleaner {
@@ -20,13 +21,13 @@ impl LogCleaner {
         }
     }
 
-    pub fn add(&self, container_id: &str, fifo: &str) {
+    pub async fn add(&self, container_id: &str, fifo: &str) {
         self.fifos
             .write()
-            .unwrap()
+            .await
             .insert(fifo.to_string(), container_id.to_string());
 
-        let mut map = self.containers.write().unwrap();
+        let mut map = self.containers.write().await;
 
         if let Some(v) = map.get_mut(container_id) {
             *v += 1;
@@ -35,13 +36,13 @@ impl LogCleaner {
         }
     }
 
-    pub fn remove(&self, fifo: &str) {
-        let container_id: String = match self.fifos.read().unwrap().get(fifo).cloned() {
+    pub async fn remove(&self, fifo: &str) {
+        let container_id: String = match self.fifos.read().await.get(fifo).cloned() {
             Some(v) => v,
             None => return,
         };
 
-        let mut map = self.containers.write().unwrap();
+        let mut map = self.containers.write().await;
 
         if let Some(v) = map.get_mut(&container_id) {
             if *v > 1 {
@@ -53,25 +54,25 @@ impl LogCleaner {
         map.remove(&container_id);
     }
 
-    pub fn cleanup(&self, duration: Duration) -> Result<(), rusqlite::Error> {
+    pub async fn cleanup(&self, duration: Duration) -> Result<(), sqlx::Error> {
         let mut max_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
 
         max_time -= duration;
-        for container in self.containers.read().unwrap().keys() {
+        for container in self.containers.read().await.keys() {
             debug!(
                 "[cleanup] cleaning up container: {} (oldest ts: {}s)",
                 container,
                 max_time.as_secs()
             );
-            let db_path = format!("{}/{}", self.dbs_path, container);
-            let con = Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
-            )?;
+            let db_url = format!("sqlite://{}/{}", self.dbs_path, container);
+            let mut con = SqliteConnection::connect(&db_url).await?;
 
-            con.execute("DELETE FROM logs WHERE ts < ?1", [max_time.as_secs()])?;
+            sqlx::query("DELETE FROM logs WHERE ts < ?1")
+                .bind(max_time.as_secs() as i64)
+                .execute(&mut con)
+                .await?;
         }
 
         Ok(())
