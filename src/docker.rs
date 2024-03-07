@@ -72,7 +72,8 @@ pub async fn start_logging(
 
     state
         .logger_pool
-        .start_logging(&conf.Info.ContainerID, &conf.File);
+        .start_logging(&conf.Info.ContainerID, &conf.File)
+        .await;
 
     json!({"Err": ""}).into()
 }

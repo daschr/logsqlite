@@ -1,22 +1,20 @@
 use chrono::DateTime;
 
-use log::{debug, error};
+use log::{debug, error, info};
 
 use core::pin::Pin;
 use futures::{
     stream::Stream,
     task::{Context, Poll},
 };
-use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, Connection, SqliteConnection};
-use std::{
-    cell::UnsafeCell,
-    sync::{Arc, RwLock},
-};
+use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, SqliteConnection};
+use std::{cell::UnsafeCell, sync::Arc};
 use std::{collections::HashMap, str::FromStr};
 
 use prost::Message;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio::time::{sleep, Duration};
 use tokio::{self, task::JoinHandle};
@@ -70,6 +68,8 @@ impl From<prost::EncodeError> for LoggerError {
     }
 }
 
+const ENTRIES_BATCH_SIZE: usize = 10_000;
+
 impl Logger {
     fn new() -> Self {
         Logger {
@@ -81,24 +81,20 @@ impl Logger {
         &self,
         reader: &mut R,
         msg: &mut Vec<u8>,
-    ) -> Result<u64, LoggerError> {
+    ) -> Result<Option<u64>, LoggerError> {
         #[allow(unused_assignments)]
         let mut msg_size = 0usize;
-        loop {
-            match timeout(std::time::Duration::from_millis(10), reader.read_u32()).await {
-                Ok(Ok(v)) => {
-                    msg_size = v as usize;
-                    break;
-                }
-                Ok(Err(e)) => {
-                    // this is some serious error and we cannot continue, the fifo may be closed
-                    return Err(e.into());
-                }
-                Err(_) => {
-                    if *self.exit.read().unwrap() {
-                        return Err(LoggerError::Exited);
-                    }
-                }
+
+        match timeout(std::time::Duration::from_millis(100), reader.read_u32()).await {
+            Ok(Ok(v)) => {
+                msg_size = v as usize;
+            }
+            Ok(Err(e)) => {
+                // this is some serious error and we cannot continue, the fifo may be closed
+                return Err(e.into());
+            }
+            Err(_) => {
+                return Ok(None);
             }
         }
 
@@ -119,7 +115,6 @@ impl Logger {
         }
 
         let mut dec_msg = logentry::LogEntry::decode(msg.as_slice())?;
-        debug!("[read_protobuf] msg: {:?}", dec_msg);
         dec_msg.line.push(b'\n');
 
         msg.clear();
@@ -127,11 +122,14 @@ impl Logger {
         msg.reserve(dec_msg.encoded_len());
         dec_msg.encode(msg)?;
 
-        Ok((dec_msg.time_nano as u64) / 1_000_000_000_u64)
+        Ok(Some((dec_msg.time_nano as u64) / 1_000_000_000_u64))
     }
 
     async fn log(&self, fifo: String, db_path: String) -> Result<(), LoggerError> {
-        let mut dbcon = SqliteConnection::connect(&format!("sqlite://{}", db_path)).await?;
+        let mut dbcon = SqliteConnectOptions::from_str(&format!("sqlite://{}", &db_path))?
+            .create_if_missing(true)
+            .connect()
+            .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS logs (ts NUMBER, message BLOB); 
@@ -140,15 +138,41 @@ impl Logger {
         .execute(&mut dbcon)
         .await?;
 
-        let mut fd = File::open(fifo).await?;
+        let mut fd = File::open(fifo.as_str()).await?;
         let mut message: Vec<u8> = Vec::new();
 
-        while !*self.exit.read().unwrap() {
+        sqlx::query("BEGIN TRANSACTION;")
+            .execute(&mut dbcon)
+            .await?;
+
+        let mut n_entries = 0;
+        while !*self.exit.read().await {
+            debug!("read_protobuf from {}...", fifo.as_str());
             match self.read_protobuf(&mut fd, &mut message).await {
-                Ok(ts) => {
+                Ok(Some(ts)) => {
                     sqlx::query("INSERT INTO logs(ts, message) VALUES(?1, ?2)")
                         .bind(ts as i64)
                         .bind(&message)
+                        .persistent(true)
+                        .execute(&mut dbcon)
+                        .await?;
+
+                    n_entries += 1;
+
+                    if n_entries >= ENTRIES_BATCH_SIZE {
+                        info!(
+                            "reached {} entries, ending current transacion",
+                            ENTRIES_BATCH_SIZE
+                        );
+                        sqlx::query("END TRANSACTION;BEGIN TRANSACTION;")
+                            .execute(&mut dbcon)
+                            .await?;
+                        n_entries = 0;
+                    }
+                }
+                Ok(None) => {
+                    info!("read timeout on fifo, ending current transacion");
+                    sqlx::query("END TRANSACTION;BEGIN TRANSACTION;")
                         .execute(&mut dbcon)
                         .await?;
                 }
@@ -159,11 +183,13 @@ impl Logger {
             }
         }
 
-        Ok(())
+        sqlx::query("END TRANSACTION;").execute(&mut dbcon).await?;
+
+        Err(LoggerError::Exited)
     }
 
-    fn exit(&self) {
-        *self.exit.write().unwrap() = true;
+    async fn exit(&self) {
+        *self.exit.write().await = true;
     }
 }
 
@@ -188,7 +214,7 @@ impl LoggerPool {
         }
     }
 
-    pub fn start_logging(&self, container_id: &str, fifo_path: &str) {
+    pub async fn start_logging(&self, container_id: &str, fifo_path: &str) {
         let logger = Arc::new(Logger::new());
         let db_path = format!("{}/{}", self.dbs_path, container_id);
         let db_p_c = db_path.clone();
@@ -198,15 +224,15 @@ impl LoggerPool {
 
         self.workers
             .write()
-            .unwrap()
+            .await
             .insert(fifo_path.to_string(), (logger.clone(), handle));
     }
 
     pub async fn stop_logging(&self, fifo_path: &str) -> Result<(), LoggerError> {
-        let res = self.workers.write().unwrap().remove(fifo_path);
+        let res = self.workers.write().await.remove(fifo_path);
 
         if let Some((logger, handle)) = res {
-            logger.exit();
+            logger.exit().await;
             return handle.await?;
         }
 
