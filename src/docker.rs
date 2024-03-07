@@ -66,7 +66,8 @@ pub async fn start_logging(
             .cleaner
             .as_ref()
             .unwrap()
-            .add(&conf.Info.ContainerID, &conf.File);
+            .add(&conf.Info.ContainerID, &conf.File)
+            .await;
     }
 
     state
@@ -90,7 +91,7 @@ pub async fn stop_logging(
     info!("[stop_logging] conf: {:?}", conf);
 
     if state.cleaner.is_some() {
-        state.cleaner.as_ref().unwrap().remove(&conf.File);
+        state.cleaner.as_ref().unwrap().remove(&conf.File).await;
     }
 
     let s = state
@@ -166,7 +167,9 @@ pub async fn read_logs(
         conf.Config.Until,
         tail,
         conf.Config.Follow.unwrap_or(false),
-    ) {
+    )
+    .await
+    {
         Ok(l) => l,
         Err(e) => {
             error!("Error creating logstream: {:?}", &e);

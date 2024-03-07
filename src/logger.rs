@@ -7,9 +7,12 @@ use futures::{
     stream::Stream,
     task::{Context, Poll},
 };
-use rusqlite::{Connection, OpenFlags};
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, Connection, SqliteConnection};
+use std::{
+    cell::UnsafeCell,
+    sync::{Arc, RwLock},
+};
+use std::{collections::HashMap, str::FromStr};
 
 use prost::Message;
 use tokio::fs::File;
@@ -30,7 +33,7 @@ pub struct Logger {
 #[derive(Debug)]
 pub enum LoggerError {
     IoError(std::io::Error),
-    SqlError(rusqlite::Error),
+    SqlError(sqlx::Error),
     JoinError(tokio::task::JoinError),
     DecodeError(prost::DecodeError),
     EncodeError(prost::EncodeError),
@@ -43,8 +46,8 @@ impl From<std::io::Error> for LoggerError {
     }
 }
 
-impl From<rusqlite::Error> for LoggerError {
-    fn from(e: rusqlite::Error) -> Self {
+impl From<sqlx::Error> for LoggerError {
+    fn from(e: sqlx::Error) -> Self {
         LoggerError::SqlError(e)
     }
 }
@@ -128,24 +131,26 @@ impl Logger {
     }
 
     async fn log(&self, fifo: String, db_path: String) -> Result<(), LoggerError> {
-        let dbcon = Connection::open(db_path)?;
-        dbcon.execute(
+        let mut dbcon = SqliteConnection::connect(&format!("sqlite://{}", db_path)).await?;
+
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS logs (ts NUMBER, message BLOB); 
             CREATE INDEX IF NOT EXISTS idx_ts ON logs(ts);",
-            (),
-        )?;
+        )
+        .execute(&mut dbcon)
+        .await?;
 
         let mut fd = File::open(fifo).await?;
-
         let mut message: Vec<u8> = Vec::new();
 
         while !*self.exit.read().unwrap() {
             match self.read_protobuf(&mut fd, &mut message).await {
                 Ok(ts) => {
-                    dbcon.execute(
-                        "INSERT INTO logs(ts, message) VALUES(?1, ?2)",
-                        (ts, &message),
-                    )?;
+                    sqlx::query("INSERT INTO logs(ts, message) VALUES(?1, ?2)")
+                        .bind(ts as i64)
+                        .bind(&message)
+                        .execute(&mut dbcon)
+                        .await?;
                 }
                 Err(e) => {
                     error!("Failed to read a protobuf message: {:?}", e);
@@ -224,27 +229,25 @@ pub struct SqliteLogStream {
     tail: Option<u64>,
     follow: bool,
     follow_counter: usize,
-    con: Connection,
+    con: UnsafeCell<SqliteConnection>,
     waker: Option<JoinHandle<()>>,
 }
 
 impl SqliteLogStream {
-    pub fn new(
+    pub async fn new(
         dbs_path: &str,
         container_id: &str,
         since: Option<String>,
         until: Option<String>,
         tail: Option<u64>,
         follow: bool,
-    ) -> Result<Self, rusqlite::Error> {
+    ) -> Result<Self, sqlx::Error> {
         let db_path = format!("{}/{}", dbs_path, container_id);
         debug!("[SqliteLogStream] db_path: {}", &db_path);
-        let con = Connection::open_with_flags(
-            &db_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        let mut con = SqliteConnectOptions::from_str(&format!("sqlite://{}", &db_path))?
+            .read_only(true)
+            .connect()
+            .await?;
 
         let mut cond = String::from("WHERE ROWID >= ?1");
         let mut parameters: Vec<u64> = vec![0];
@@ -272,24 +275,31 @@ impl SqliteLogStream {
             let stmt_s = format!("SELECT count(*) FROM logs {}", cond);
             debug!("stmt_s: {} params {:?}", stmt_s, &parameters);
 
-            let mut stmt = con.prepare(&stmt_s)?;
+            let mut stmt = sqlx::query_as::<_, (i64,)>(&stmt_s);
+            for param in &parameters {
+                stmt = stmt.bind(*param as i64);
+            }
 
-            let nrows: u64 = stmt.query_row(rusqlite::params_from_iter(&parameters), |r| {
-                r.get::<usize, u64>(0)
-            })?;
+            let nrows: u64 = stmt.fetch_one(&mut con).await?.0 as u64;
 
             let stmt_s = format!(
                 "SELECT ROWID FROM logs {} LIMIT 1 OFFSET ?{}",
                 cond,
                 parameters.len() + 1
             );
+
             debug!("stmt_s: {}", &stmt_s);
-            stmt = con.prepare(&stmt_s)?;
-            debug!("nrows: {}", nrows);
+
+            stmt = sqlx::query_as::<_, (i64,)>(&stmt_s);
+
             parameters.push(if nrows > tail { nrows - tail } else { 0 });
-            first_rowid = stmt.query_row(rusqlite::params_from_iter(&parameters), |r| {
-                r.get::<usize, u64>(0)
-            })?;
+
+            for param in &parameters {
+                stmt = stmt.bind(*param as i64);
+            }
+
+            first_rowid = stmt.fetch_one(&mut con).await?.0 as u64;
+
             parameters.pop();
             debug!("first_rowid: {}", first_rowid);
         }
@@ -305,7 +315,7 @@ impl SqliteLogStream {
             tail: if follow { None } else { tail },
             follow,
             follow_counter: 0,
-            con,
+            con: UnsafeCell::new(con),
             waker: None,
         })
     }
@@ -330,19 +340,35 @@ impl Stream for SqliteLogStream {
 
         self.parameters[0] = self.next_rowid;
         let res = {
-            let mut stmt = match self.con.prepare(&self.stmt_s) {
-                Ok(s) => s,
-                Err(_) => return Poll::Ready(None),
+            let stmt_s = self.stmt_s.as_str();
+            let mut stmt = sqlx::query_as::<_, (i64, Vec<u8>)>(stmt_s);
+            for param in &self.parameters {
+                stmt = stmt.bind(*param as i64);
+            }
+
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    error!("Failed to create single-threaded runtime: {:?}", e);
+                    return Poll::Ready(None);
+                }
             };
 
-            let res: Option<(u64, Vec<u8>)> = stmt
-                .query_row(rusqlite::params_from_iter(&self.parameters), |r| {
-                    let rowid = r.get::<usize, u64>(0)?;
-                    let v = r.get::<usize, Vec<u8>>(1)?;
-                    Ok((rowid, v))
-                })
+            let res: Option<(i64, Vec<u8>)> = rt
+                .block_on(stmt.fetch_one(unsafe { &mut *self.con.get() }))
                 .ok();
 
+            /*let res: Option<(u64, Vec<u8>)> = stmt
+                            .query_row(rusqlite::params_from_iter(&self.parameters), |r| {
+                                let rowid = r.get::<usize, u64>(0)?;
+                                let v = r.get::<usize, Vec<u8>>(1)?;
+                                Ok((rowid, v))
+                            })
+                            .ok();
+            */
             debug!(
                 "[stream] {:?} [{}]",
                 res,
@@ -359,7 +385,7 @@ impl Stream for SqliteLogStream {
         if res.is_some() {
             self.counter += 1;
             self.follow_counter = 0;
-            self.next_rowid = res.as_ref().unwrap().0 + 1;
+            self.next_rowid = res.as_ref().unwrap().0 as u64 + 1;
         }
 
         match res {

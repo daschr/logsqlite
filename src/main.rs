@@ -56,7 +56,7 @@ async fn main() -> Result<(), config::ParsingError> {
         task::spawn(async move {
             loop {
                 debug!("[cleanup] running...");
-                c.cleanup(c_a).ok();
+                c.cleanup(c_a).await.ok();
                 debug!("[cleanup] sleeping...");
                 time::sleep(time::Duration::from_secs(conf.cleanup_interval.as_secs())).await;
             }
