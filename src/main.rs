@@ -2,16 +2,18 @@ mod cleaner;
 mod config;
 mod docker;
 mod logger;
+mod statehandler;
 
 use axum::http::Request;
 use axum::middleware::map_request;
 use axum::{routing::post, Router, Server};
 use docker::ApiState;
+use futures_util::StreamExt;
 use hyperlocal::UnixServerExt;
-use log::{self, debug};
-use std::env;
-use std::sync::Arc;
-use tokio::{task, time};
+use log::{self, debug, error, info};
+use statehandler::StateHandler;
+use std::{env, process::exit, sync::Arc};
+use tokio::{sync::mpsc::channel, task, time};
 
 async fn normalize_dockerjson<B>(mut req: Request<B>) -> Request<B> {
     let headers = req.headers_mut();
@@ -45,10 +47,25 @@ async fn main() -> Result<(), config::ParsingError> {
 
     debug!("config: {:?}", &conf);
 
-    let state = Arc::new(ApiState::new(
-        conf.databases_dir.to_str().unwrap().to_string(),
-        conf.cleanup_age.is_some(),
-    ));
+    let mut state_handler = match StateHandler::new(conf.state_database.as_path()).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to open state database: {:?}", e);
+            exit(1);
+        }
+    };
+
+    let (tx, rx) = channel(1024);
+
+    let state = Arc::new(
+        ApiState::new(
+            conf.databases_dir.to_str().unwrap().to_string(),
+            conf.cleanup_age.is_some(),
+            tx,
+        )
+        .await
+        .expect("Failed to create ApiState"),
+    );
 
     if conf.cleanup_age.is_some() {
         let c = state.cleaner.as_ref().unwrap().clone();
@@ -63,6 +80,31 @@ async fn main() -> Result<(), config::ParsingError> {
         });
     }
 
+    {
+        let mut stream = state_handler.get_active_fetches().await;
+        while let Some(v) = stream.next().await {
+            match v {
+                Ok((container_id, fifo)) => {
+                    info!(
+                        "Starting to log {} using fifo {} again...",
+                        &container_id, &fifo
+                    );
+                    state.logger_pool.start_logging(&container_id, &fifo).await;
+                }
+                Err(e) => {
+                    eprintln!("Failed to replay state: {:?}", e);
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    let state_handler_handle = tokio::spawn(async move {
+        if let Err(e) = state_handler.handle(rx).await {
+            error!("Error at StateHandler: {:?}", e);
+        }
+    });
+
     let router = Router::new()
         .route("/LogDriver.StartLogging", post(docker::start_logging))
         .route("/LogDriver.StopLogging", post(docker::stop_logging))
@@ -75,7 +117,17 @@ async fn main() -> Result<(), config::ParsingError> {
     let builder =
         Server::bind_unix(conf.unix_socket_path).expect("could not listen on unix socket");
 
-    builder.serve(router.into_make_service()).await.unwrap();
+    let builder_handle =
+        tokio::spawn(async move { builder.serve(router.into_make_service()).await.unwrap() });
+
+    tokio::select! {
+        _ = state_handler_handle => {
+            error!("StateHandler exited!");
+        }
+        _ = builder_handle => {
+            error!("StateHandler exited!");
+        }
+    };
 
     Ok(())
 }

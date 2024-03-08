@@ -1,33 +1,41 @@
 use crate::cleaner::LogCleaner;
-use crate::logger::LoggerPool;
-use crate::logger::SqliteLogStream;
+use crate::logger::{LoggerPool, SqliteLogStream};
+use crate::statehandler::StateHandlerMessage;
 
-use axum::body::StreamBody;
-use axum::debug_handler;
-use axum::extract::{Json, State};
-use axum::http::Uri;
-use axum::response::IntoResponse;
+use axum::{
+    body::StreamBody,
+    debug_handler,
+    extract::{Json, State},
+    http::Uri,
+    response::IntoResponse,
+};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use tokio::sync::mpsc::Sender;
 
 pub struct ApiState {
     pub logger_pool: LoggerPool,
     pub cleaner: Option<LogCleaner>,
+    pub state_handler_tx: Sender<StateHandlerMessage>,
 }
 
 impl ApiState {
-    pub fn new(dbs_path: String, with_cleaner: bool) -> Self {
-        ApiState {
+    pub async fn new(
+        dbs_path: String,
+        with_cleaner: bool,
+        state_handler_tx: Sender<StateHandlerMessage>,
+    ) -> Result<Self, sqlx::Error> {
+        Ok(ApiState {
             logger_pool: LoggerPool::new(dbs_path.clone()),
             cleaner: if with_cleaner {
                 Some(LogCleaner::new(dbs_path))
             } else {
                 None
             },
-        }
+            state_handler_tx,
+        })
     }
 }
 
@@ -75,6 +83,15 @@ pub async fn start_logging(
         .start_logging(&conf.Info.ContainerID, &conf.File)
         .await;
 
+    state
+        .state_handler_tx
+        .send(StateHandlerMessage::StartLogging {
+            container_id: conf.Info.ContainerID.clone(),
+            fifo: PathBuf::from(conf.File.as_str()),
+        })
+        .await
+        .expect("failed to enqueue StateHandlerMessage");
+
     json!({"Err": ""}).into()
 }
 
@@ -100,6 +117,14 @@ pub async fn stop_logging(
         .stop_logging(&conf.File)
         .await
         .map_or(String::new(), |f| format!("{:?}", f));
+
+    state
+        .state_handler_tx
+        .send(StateHandlerMessage::StopLogging {
+            fifo: PathBuf::from(conf.File),
+        })
+        .await
+        .expect("failed to enqueue StateHandlerMessage");
 
     json!({"Err": s}).into()
 }
