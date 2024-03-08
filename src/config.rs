@@ -6,6 +6,7 @@ use std::time::Duration;
 pub struct Config {
     pub unix_socket_path: PathBuf,
     pub databases_dir: PathBuf,
+    pub state_database: PathBuf,
     pub cleanup_age: Option<Duration>,
     pub cleanup_interval: Duration,
 }
@@ -101,6 +102,14 @@ impl TryFrom<ConfigSource<String>> for Config {
             )?
             .join("logsqlite.sock"),
             databases_dir: get_dir(&config, "general", "databases_dir", "/var/spool/logsqlite/")?,
+            state_database: match config.get("general", "state_database") {
+                Some(p) => PathBuf::from(p),
+                None => {
+                    return Err(ParsingError::ConfError(String::from(
+                        "Missing \"state_database\"",
+                    )))
+                }
+            },
             cleanup_age: match config.get("cleanup", "age") {
                 Some(s) => Some(parse_as_duration(s.as_str())?),
                 None => None,
