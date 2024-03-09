@@ -1,3 +1,4 @@
+use crate::config::Config;
 use chrono::DateTime;
 
 use log::{debug, error, info};
@@ -70,8 +71,6 @@ impl From<prost::EncodeError> for LoggerError {
     }
 }
 
-const ENTRIES_BATCH_SIZE: usize = 10_000;
-
 impl Logger {
     fn new() -> Self {
         Logger {
@@ -83,11 +82,12 @@ impl Logger {
         &self,
         reader: &mut R,
         msg: &mut Vec<u8>,
+        read_timeout: Duration,
     ) -> Result<Option<u64>, LoggerError> {
         #[allow(unused_assignments)]
         let mut msg_size = 0usize;
 
-        match timeout(std::time::Duration::from_millis(100), reader.read_u32()).await {
+        match timeout(read_timeout, reader.read_u32()).await {
             Ok(Ok(v)) => {
                 msg_size = v as usize;
             }
@@ -127,7 +127,12 @@ impl Logger {
         Ok(Some((dec_msg.time_nano as u64) / 1_000_000_000_u64))
     }
 
-    async fn log(&self, fifo: String, db_path: String) -> Result<(), LoggerError> {
+    async fn log(
+        &self,
+        fifo: String,
+        db_path: String,
+        config: Arc<Config>,
+    ) -> Result<(), LoggerError> {
         let mut dbcon = SqliteConnectOptions::from_str(&format!("sqlite://{}", &db_path))?
             .create_if_missing(true)
             .connect()
@@ -149,9 +154,14 @@ impl Logger {
 
         let mut no_entries_ts = Instant::now();
         let mut nb_entries = 0;
+        let mut acc_entries_size = 0;
+
         while !*self.exit.read().await {
             debug!("read_protobuf from {}...", fifo.as_str());
-            match self.read_protobuf(&mut fd, &mut message).await {
+            match self
+                .read_protobuf(&mut fd, &mut message, config.message_read_timeout)
+                .await
+            {
                 Ok(Some(ts)) => {
                     sqlx::query("INSERT INTO logs(ts, message) VALUES(?1, ?2)")
                         .bind(ts as i64)
@@ -161,15 +171,19 @@ impl Logger {
                         .await?;
 
                     nb_entries += 1;
+                    acc_entries_size += message.len();
 
-                    if nb_entries >= ENTRIES_BATCH_SIZE {
+                    if nb_entries >= config.max_lines_per_tx
+                        || acc_entries_size >= config.max_size_per_tx
+                    {
                         sqlx::query("END TRANSACTION;BEGIN TRANSACTION;")
                             .execute(&mut dbcon)
                             .await?;
 
                         info!(
-                            "reached {} entries, ending current transacion {:.2} lines/s",
-                            ENTRIES_BATCH_SIZE,
+                            "reached {} entries with {} bytes size, ending current transacion ({:.2} lines/s)",
+                            nb_entries,
+                            acc_entries_size,
                             nb_entries as f64
                                 * (1_000_000f64
                                     / Instant::now().duration_since(no_entries_ts).as_micros()
@@ -178,6 +192,7 @@ impl Logger {
 
                         no_entries_ts = Instant::now();
                         nb_entries = 0;
+                        acc_entries_size = 0;
                     }
                 }
                 Ok(None) => {
@@ -214,13 +229,15 @@ pub struct LoggerPool {
             ),
         >,
     >,
+    config: Arc<Config>,
 }
 
 impl LoggerPool {
-    pub fn new(dbs_path: String) -> Self {
+    pub fn new(dbs_path: String, config: Arc<Config>) -> Self {
         LoggerPool {
             dbs_path,
             workers: RwLock::new(HashMap::new()),
+            config,
         }
     }
 
@@ -230,7 +247,8 @@ impl LoggerPool {
         let db_p_c = db_path.clone();
         let f_path = fifo_path.to_string();
         let c_l = logger.clone();
-        let handle = tokio::spawn(async move { c_l.log(f_path, db_p_c).await });
+        let c_conf = self.config.clone();
+        let handle = tokio::spawn(async move { c_l.log(f_path, db_p_c, c_conf).await });
 
         self.workers
             .write()

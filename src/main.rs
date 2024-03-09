@@ -42,8 +42,9 @@ async fn main() -> Result<(), config::ParsingError> {
         return Ok(());
     }
 
-    let conf: config::Config =
-        config::Config::try_from(config::ConfigSource::File(args[1].clone()))?;
+    let conf: Arc<config::Config> = Arc::new(config::Config::try_from(
+        config::ConfigSource::File(args[1].clone()),
+    )?);
 
     debug!("config: {:?}", &conf);
 
@@ -62,6 +63,7 @@ async fn main() -> Result<(), config::ParsingError> {
             conf.databases_dir.to_str().unwrap().to_string(),
             conf.cleanup_age.is_some(),
             tx,
+            conf.clone(),
         )
         .await
         .expect("Failed to create ApiState"),
@@ -70,12 +72,13 @@ async fn main() -> Result<(), config::ParsingError> {
     if conf.cleanup_age.is_some() {
         let c = state.cleaner.as_ref().unwrap().clone();
         let c_a = conf.cleanup_age.unwrap();
+        let cleanup_interval = conf.cleanup_interval.as_secs();
         task::spawn(async move {
             loop {
                 debug!("[cleanup] running...");
                 c.cleanup(c_a).await.ok();
                 debug!("[cleanup] sleeping...");
-                time::sleep(time::Duration::from_secs(conf.cleanup_interval.as_secs())).await;
+                time::sleep(time::Duration::from_secs(cleanup_interval)).await;
             }
         });
     }
@@ -114,8 +117,8 @@ async fn main() -> Result<(), config::ParsingError> {
         .layer(map_request(normalize_dockerjson))
         .fallback(docker::fallback)
         .with_state(state);
-    let builder =
-        Server::bind_unix(conf.unix_socket_path).expect("could not listen on unix socket");
+    let builder = Server::bind_unix(conf.unix_socket_path.as_path())
+        .expect("could not listen on unix socket");
 
     let builder_handle =
         tokio::spawn(async move { builder.serve(router.into_make_service()).await.unwrap() });

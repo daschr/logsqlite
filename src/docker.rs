@@ -1,4 +1,5 @@
 use crate::cleaner::LogCleaner;
+use crate::config::Config;
 use crate::logger::{LoggerPool, SqliteLogStream};
 use crate::statehandler::StateHandlerMessage;
 
@@ -19,6 +20,7 @@ pub struct ApiState {
     pub logger_pool: LoggerPool,
     pub cleaner: Option<LogCleaner>,
     pub state_handler_tx: Sender<StateHandlerMessage>,
+    pub config: Arc<Config>,
 }
 
 impl ApiState {
@@ -26,15 +28,17 @@ impl ApiState {
         dbs_path: String,
         with_cleaner: bool,
         state_handler_tx: Sender<StateHandlerMessage>,
+        config: Arc<Config>,
     ) -> Result<Self, sqlx::Error> {
         Ok(ApiState {
-            logger_pool: LoggerPool::new(dbs_path.clone()),
+            logger_pool: LoggerPool::new(dbs_path.clone(), config.clone()),
             cleaner: if with_cleaner {
                 Some(LogCleaner::new(dbs_path))
             } else {
                 None
             },
             state_handler_tx,
+            config,
         })
     }
 }

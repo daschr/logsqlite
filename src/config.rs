@@ -7,7 +7,11 @@ pub struct Config {
     pub unix_socket_path: PathBuf,
     pub databases_dir: PathBuf,
     pub state_database: PathBuf,
+    pub max_lines_per_tx: u64,
+    pub max_size_per_tx: usize, // bytes
+    pub message_read_timeout: Duration,
     pub cleanup_age: Option<Duration>,
+    pub cleanup_max_lines: Option<u64>,
     pub cleanup_interval: Duration,
 }
 
@@ -83,6 +87,36 @@ fn parse_as_duration(v: &str) -> Result<Duration, String> {
     Ok(Duration::from_secs(num))
 }
 
+fn parse_si_prefixed_size(v: &str) -> Result<usize, String> {
+    let pos = {
+        let mut r = 0;
+        for c in v.chars() {
+            if !c.is_ascii_digit() {
+                break;
+            }
+            r += 1;
+        }
+        r
+    };
+
+    if pos == 0 {
+        return Err(String::from("Cannot parse size: no number"));
+    }
+
+    let mut num: u64 = v[0..pos].parse::<u64>().unwrap();
+    match &v[pos..] {
+        "g" | "G" => num *= 1024 * 1024 * 1024,
+        "m" | "M" => num *= 1024 * 1024,
+        "k" | "K" => num *= 1024,
+        "b" | "B" => (),
+        s => {
+            return Err(format!("Unknown time specifier \"{}\"", s));
+        }
+    }
+
+    Ok(num as usize)
+}
+
 impl TryFrom<ConfigSource<String>> for Config {
     type Error = ParsingError;
 
@@ -110,10 +144,23 @@ impl TryFrom<ConfigSource<String>> for Config {
                     )))
                 }
             },
+            message_read_timeout: Duration::from_millis(
+                config
+                    .getuint("general", "message_read_timeout")?
+                    .unwrap_or(100),
+            ),
+            max_lines_per_tx: config
+                .getuint("general", "max_lines_per_tx")?
+                .unwrap_or(10_000),
+            max_size_per_tx: match config.get("general", "max_size_per_tx") {
+                Some(s) => parse_si_prefixed_size(s.as_str())?,
+                None => 1024 * 1024 * 20,
+            },
             cleanup_age: match config.get("cleanup", "age") {
                 Some(s) => Some(parse_as_duration(s.as_str())?),
                 None => None,
             },
+            cleanup_max_lines: config.getuint("general", "cleanup_max_lines")?,
             cleanup_interval: config
                 .getuint("cleanup", "interval")?
                 .map(Duration::from_secs)
