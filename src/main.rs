@@ -13,7 +13,7 @@ use hyperlocal::UnixServerExt;
 use log::{self, debug, error, info};
 use statehandler::StateHandler;
 use std::{env, process::exit, sync::Arc};
-use tokio::{sync::mpsc::channel, task, time};
+use tokio::{sync::mpsc::channel, task};
 
 async fn normalize_dockerjson<B>(mut req: Request<B>) -> Request<B> {
     let headers = req.headers_mut();
@@ -61,7 +61,6 @@ async fn main() -> Result<(), config::ParsingError> {
     let state = Arc::new(
         ApiState::new(
             conf.databases_dir.to_str().unwrap().to_string(),
-            conf.cleanup_age.is_some(),
             tx,
             conf.clone(),
         )
@@ -69,16 +68,17 @@ async fn main() -> Result<(), config::ParsingError> {
         .expect("Failed to create ApiState"),
     );
 
-    if conf.cleanup_age.is_some() {
-        let c = state.cleaner.as_ref().unwrap().clone();
-        let c_a = conf.cleanup_age.unwrap();
-        let cleanup_interval = conf.cleanup_interval.as_secs();
+    if conf.cleanup_age.is_some() || conf.cleanup_max_lines.is_some() {
+        let cleaner = state.cleaner.as_ref().unwrap().clone();
+        let cleanup_interval = conf.cleanup_interval.clone();
         task::spawn(async move {
-            loop {
-                debug!("[cleanup] running...");
-                c.cleanup(c_a).await.ok();
-                debug!("[cleanup] sleeping...");
-                time::sleep(time::Duration::from_secs(cleanup_interval)).await;
+            match cleaner.run(cleanup_interval).await {
+                Ok(()) => {
+                    error!("Cleaner exited!");
+                }
+                Err(e) => {
+                    error!("Error running cleaner: {:?}", e);
+                }
             }
         });
     }

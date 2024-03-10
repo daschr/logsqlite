@@ -196,7 +196,6 @@ impl Logger {
                     }
                 }
                 Ok(None) => {
-                    info!("read timeout on fifo, ending current transacion");
                     sqlx::query("END TRANSACTION;BEGIN TRANSACTION;")
                         .execute(&mut dbcon)
                         .await?;

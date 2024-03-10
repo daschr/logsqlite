@@ -26,14 +26,17 @@ pub struct ApiState {
 impl ApiState {
     pub async fn new(
         dbs_path: String,
-        with_cleaner: bool,
         state_handler_tx: Sender<StateHandlerMessage>,
         config: Arc<Config>,
     ) -> Result<Self, sqlx::Error> {
         Ok(ApiState {
             logger_pool: LoggerPool::new(dbs_path.clone(), config.clone()),
-            cleaner: if with_cleaner {
-                Some(LogCleaner::new(dbs_path))
+            cleaner: if config.cleanup_age.is_some() || config.cleanup_max_lines.is_some() {
+                Some(LogCleaner::new(
+                    dbs_path,
+                    config.cleanup_age,
+                    config.cleanup_max_lines,
+                ))
             } else {
                 None
             },

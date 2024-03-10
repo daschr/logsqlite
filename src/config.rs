@@ -160,7 +160,7 @@ impl TryFrom<ConfigSource<String>> for Config {
                 Some(s) => Some(parse_as_duration(s.as_str())?),
                 None => None,
             },
-            cleanup_max_lines: config.getuint("general", "cleanup_max_lines")?,
+            cleanup_max_lines: config.getuint("cleanup", "max_lines")?,
             cleanup_interval: config
                 .getuint("cleanup", "interval")?
                 .map(Duration::from_secs)
