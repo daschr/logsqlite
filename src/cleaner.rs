@@ -1,13 +1,14 @@
 use log::{debug, error, info};
 use sqlx::{Connection, SqliteConnection};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::{sync::RwLock, time};
 
 #[derive(Clone)]
 pub struct LogCleaner {
-    fifos: Arc<RwLock<HashMap<String, String>>>,
+    fifos: Arc<RwLock<HashMap<PathBuf, String>>>,
     containers: Arc<RwLock<HashMap<String, usize>>>,
     dbs_path: String,
     cleanup_age: Option<Duration>,
@@ -33,11 +34,11 @@ impl LogCleaner {
         }
     }
 
-    pub async fn add(&self, container_id: &str, fifo: &str) {
+    pub async fn add(&self, container_id: &str, fifo: PathBuf) {
         self.fifos
             .write()
             .await
-            .insert(fifo.to_string(), container_id.to_string());
+            .insert(fifo, container_id.to_string());
 
         let mut map = self.containers.write().await;
 
@@ -48,7 +49,7 @@ impl LogCleaner {
         }
     }
 
-    pub async fn remove(&self, fifo: &str) {
+    pub async fn remove(&self, fifo: &Path) {
         let container_id: String = match self.fifos.read().await.get(fifo).cloned() {
             Some(v) => v,
             None => return,
@@ -108,6 +109,11 @@ impl LogCleaner {
 
                 max_time -= cleanup_age;
 
+                debug!(
+                    "cleanup: DELETE FROM logs WHERE ts < {} OR ROWID < {}",
+                    max_time.as_secs(),
+                    rowid
+                );
                 sqlx::query("DELETE FROM logs WHERE ts < ?1 OR ROWID < ?2")
                     .bind(max_time.as_secs() as i64)
                     .bind(rowid as i64)
@@ -121,6 +127,10 @@ impl LogCleaner {
 
                 max_time -= cleanup_age;
 
+                debug!(
+                    "cleanup: DELETE FROM logs WHERE ts < {}",
+                    max_time.as_secs()
+                );
                 sqlx::query("DELETE FROM logs WHERE ts < ?1")
                     .bind(max_time.as_secs() as i64)
                     .execute(con)
@@ -129,6 +139,7 @@ impl LogCleaner {
             (None, Some(max_lines)) => {
                 let rowid = Self::get_first_tail_rowid(con, max_lines as u64).await?;
 
+                debug!("cleanup: DELETE FROM logs WHERE ROWID < {}", rowid);
                 sqlx::query("DELETE FROM logs WHERE ROWID < ?1")
                     .bind(rowid as i64)
                     .execute(con)

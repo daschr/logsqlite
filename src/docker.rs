@@ -1,6 +1,5 @@
-use crate::cleaner::LogCleaner;
 use crate::config::Config;
-use crate::logger::{LoggerPool, SqliteLogStream};
+use crate::logger::SqliteLogStream;
 use crate::statehandler::StateHandlerMessage;
 
 use axum::{
@@ -17,29 +16,16 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::mpsc::Sender;
 
 pub struct ApiState {
-    pub logger_pool: LoggerPool,
-    pub cleaner: Option<LogCleaner>,
     pub state_handler_tx: Sender<StateHandlerMessage>,
     pub config: Arc<Config>,
 }
 
 impl ApiState {
     pub async fn new(
-        dbs_path: String,
         state_handler_tx: Sender<StateHandlerMessage>,
         config: Arc<Config>,
     ) -> Result<Self, sqlx::Error> {
         Ok(ApiState {
-            logger_pool: LoggerPool::new(dbs_path.clone(), config.clone()),
-            cleaner: if config.cleanup_age.is_some() || config.cleanup_max_lines.is_some() {
-                Some(LogCleaner::new(
-                    dbs_path,
-                    config.cleanup_age,
-                    config.cleanup_max_lines,
-                ))
-            } else {
-                None
-            },
             state_handler_tx,
             config,
         })
@@ -76,20 +62,6 @@ pub async fn start_logging(
 ) -> Json<Value> {
     info!("[start_logging] conf: {:?}", conf);
 
-    if state.cleaner.is_some() {
-        state
-            .cleaner
-            .as_ref()
-            .unwrap()
-            .add(&conf.Info.ContainerID, &conf.File)
-            .await;
-    }
-
-    state
-        .logger_pool
-        .start_logging(&conf.Info.ContainerID, &conf.File)
-        .await;
-
     state
         .state_handler_tx
         .send(StateHandlerMessage::StartLogging {
@@ -115,25 +87,15 @@ pub async fn stop_logging(
 ) -> Json<Value> {
     info!("[stop_logging] conf: {:?}", conf);
 
-    if state.cleaner.is_some() {
-        state.cleaner.as_ref().unwrap().remove(&conf.File).await;
-    }
-
-    let s = state
-        .logger_pool
-        .stop_logging(&conf.File)
-        .await
-        .map_or(String::new(), |f| format!("{:?}", f));
-
     state
         .state_handler_tx
         .send(StateHandlerMessage::StopLogging {
             fifo: PathBuf::from(conf.File),
         })
         .await
-        .expect("failed to enqueue StateHandlerMessage");
+        .expect("Failed to enqueue StateHandlerMessage");
 
-    json!({"Err": s}).into()
+    json!({"Err": ""}).into()
 }
 
 pub async fn capabilities() -> Json<Value> {
@@ -194,7 +156,7 @@ pub async fn read_logs(
     }
 
     let logstream = match SqliteLogStream::new(
-        &state.logger_pool.dbs_path,
+        &state.config.databases_dir.as_path(),
         &conf.Info.ContainerID,
         conf.Config.Since,
         conf.Config.Until,

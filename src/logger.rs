@@ -1,7 +1,9 @@
 use crate::config::Config;
 use chrono::DateTime;
-
 use log::{debug, error, info};
+
+use crate::statehandler::StateHandlerMessage;
+use tokio::sync::mpsc::Sender;
 
 use core::pin::Pin;
 use futures::{
@@ -10,7 +12,8 @@ use futures::{
     task::{Context, Poll},
 };
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions, SqliteConnection};
-use std::{cell::UnsafeCell, collections::HashMap, str::FromStr, sync::Arc};
+use std::path::Path;
+use std::{cell::UnsafeCell, collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 
 use prost::Message;
 use tokio::{
@@ -129,14 +132,15 @@ impl Logger {
 
     async fn log(
         &self,
-        fifo: String,
-        db_path: String,
+        fifo: PathBuf,
+        db_path: PathBuf,
         config: Arc<Config>,
     ) -> Result<(), LoggerError> {
-        let mut dbcon = SqliteConnectOptions::from_str(&format!("sqlite://{}", &db_path))?
-            .create_if_missing(true)
-            .connect()
-            .await?;
+        let mut dbcon =
+            SqliteConnectOptions::from_str(&format!("sqlite://{}", &db_path.display()))?
+                .create_if_missing(true)
+                .connect()
+                .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS logs (ts NUMBER, message BLOB); 
@@ -145,7 +149,7 @@ impl Logger {
         .execute(&mut dbcon)
         .await?;
 
-        let mut fd = File::open(fifo.as_str()).await?;
+        let mut fd = File::open(&fifo).await?;
         let mut message: Vec<u8> = Vec::new();
 
         sqlx::query("BEGIN TRANSACTION;")
@@ -157,7 +161,7 @@ impl Logger {
         let mut acc_entries_size = 0;
 
         while !*self.exit.read().await {
-            debug!("read_protobuf from {}...", fifo.as_str());
+            debug!("read_protobuf from {}...", fifo.display());
             match self
                 .read_protobuf(&mut fd, &mut message, config.message_read_timeout)
                 .await
@@ -218,52 +222,56 @@ impl Logger {
 }
 
 pub struct LoggerPool {
-    pub dbs_path: String,
-    workers: RwLock<
-        HashMap<
-            String,
-            (
-                Arc<Logger>,
-                tokio::task::JoinHandle<Result<(), LoggerError>>,
-            ),
-        >,
-    >,
+    workers: RwLock<HashMap<PathBuf, (Arc<Logger>, tokio::task::JoinHandle<()>)>>,
     config: Arc<Config>,
 }
 
 impl LoggerPool {
-    pub fn new(dbs_path: String, config: Arc<Config>) -> Self {
+    pub fn new(config: Arc<Config>) -> Self {
         LoggerPool {
-            dbs_path,
             workers: RwLock::new(HashMap::new()),
             config,
         }
     }
 
-    pub async fn start_logging(&self, container_id: &str, fifo_path: &str) {
+    pub async fn start_logging(
+        &self,
+        container_id: &str,
+        fifo_path: PathBuf,
+        tx: Sender<StateHandlerMessage>,
+    ) {
         let logger = Arc::new(Logger::new());
-        let db_path = format!("{}/{}", self.dbs_path, container_id);
-        let db_p_c = db_path.clone();
-        let f_path = fifo_path.to_string();
+        let mut db_path = self.config.databases_dir.clone();
+        db_path.push(container_id);
+
+        let f_path = fifo_path.clone();
         let c_l = logger.clone();
         let c_conf = self.config.clone();
-        let handle = tokio::spawn(async move { c_l.log(f_path, db_p_c, c_conf).await });
+
+        let c_container_id = container_id.to_string();
+
+        let handle = tokio::spawn(async move {
+            tx.send(StateHandlerMessage::LoggingStopped {
+                container_id: c_container_id,
+                result: c_l.log(f_path, db_path, c_conf).await,
+            })
+            .await
+            .expect("Could not enqueue StateHandlerMessage");
+        });
 
         self.workers
             .write()
             .await
-            .insert(fifo_path.to_string(), (logger.clone(), handle));
+            .insert(fifo_path, (logger.clone(), handle));
     }
 
-    pub async fn stop_logging(&self, fifo_path: &str) -> Result<(), LoggerError> {
+    pub async fn stop_logging(&self, fifo_path: &Path) {
         let res = self.workers.write().await.remove(fifo_path);
 
         if let Some((logger, handle)) = res {
             logger.exit().await;
-            return handle.await?;
+            handle.await.ok();
         }
-
-        Ok(())
     }
 }
 
@@ -288,14 +296,14 @@ pub struct SqliteLogStream {
 
 impl SqliteLogStream {
     pub async fn new(
-        dbs_path: &str,
+        dbs_path: &Path,
         container_id: &str,
         since: Option<String>,
         until: Option<String>,
         tail: Option<u64>,
         follow: bool,
     ) -> Result<Self, sqlx::Error> {
-        let db_path = format!("{}/{}", dbs_path, container_id);
+        let db_path = format!("{}/{}", dbs_path.display(), container_id);
         debug!("[SqliteLogStream] db_path: {}", &db_path);
         let mut con = SqliteConnectOptions::from_str(&format!("sqlite://{}", &db_path))?
             .read_only(true)
