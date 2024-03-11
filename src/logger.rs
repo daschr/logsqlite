@@ -203,6 +203,10 @@ impl Logger {
                     sqlx::query("END TRANSACTION;BEGIN TRANSACTION;")
                         .execute(&mut dbcon)
                         .await?;
+
+                    no_entries_ts = Instant::now();
+                    nb_entries = 0;
+                    acc_entries_size = 0;
                 }
                 Err(e) => {
                     warn!("Failed to read a protobuf message: {:?}", e);
@@ -404,7 +408,7 @@ impl Stream for SqliteLogStream {
                     Ok(s) => Some(s),
                     Err(sqlx::Error::RowNotFound) => None,
                     Err(e) => {
-                        error!("Got SQL error: {:?}", e);
+                        error!("[SqliteLogStream] Got SQL error: {:?}", e);
                         return Poll::Ready(None);
                     }
                 };
