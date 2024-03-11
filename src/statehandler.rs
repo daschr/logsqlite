@@ -11,7 +11,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::cleaner::LogCleaner;
 use crate::config::Config;
-use crate::log::{error, info};
+use crate::log::{info, warn};
 use crate::logger::{LoggerError, LoggerPool};
 
 pub struct State {
@@ -75,6 +75,7 @@ pub enum StateHandlerMessage {
     },
     LoggingStopped {
         container_id: String,
+        fifo: PathBuf,
         result: Result<(), LoggerError>,
     },
 }
@@ -136,9 +137,8 @@ impl StateHandler {
                 StateHandlerMessage::StopLogging { fifo } => {
                     info!("[StateHandler] stopping logging of fifo {}", fifo.display());
 
-                    let fifo_str = fifo.as_path().display().to_string();
                     sqlx::query("DELETE FROM active_fetches where fifo = ?1")
-                        .bind(&fifo_str)
+                        .bind(fifo.as_path().display().to_string())
                         .execute(&mut self.dbcon)
                         .await?;
 
@@ -146,13 +146,37 @@ impl StateHandler {
                 }
                 StateHandlerMessage::LoggingStopped {
                     container_id,
+                    fifo,
                     result,
                 } => {
                     if let Err(e) = result {
-                        error!(
+                        warn!(
                             "[StateHandler] logger of container {} returned: {:?}",
                             container_id, e
                         );
+                        match e {
+                            LoggerError::DecodeError(_) => {
+                                info!(
+                                "[StateHandler] restarting logging of {} using fifo {}, since last error was a decode error",
+                                &container_id,
+                                fifo.display()
+                                );
+
+                                self.state.stop_logging(&fifo).await;
+
+                                self.state
+                                    .start_logging(&container_id, &fifo, self.tx.clone())
+                                    .await;
+                            }
+                            _ => {
+                                sqlx::query("DELETE FROM active_fetches where fifo = ?1")
+                                    .bind(fifo.as_path().display().to_string())
+                                    .execute(&mut self.dbcon)
+                                    .await?;
+
+                                self.state.stop_logging(&fifo).await;
+                            }
+                        }
                     }
                 }
             }
@@ -171,7 +195,7 @@ impl StateHandler {
             let (container_id, fifo) = r?;
 
             info!(
-                "[StateHandler] replaying logigng of {} using fifo {}",
+                "[StateHandler] replaying logging of {} using fifo {}",
                 container_id, fifo
             );
 

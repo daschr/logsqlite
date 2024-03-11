@@ -71,6 +71,8 @@ pub async fn start_logging(
         .await
         .expect("failed to enqueue StateHandlerMessage");
 
+    info!("[docker::start_logging] send StartLogging message to StateHandler");
+
     json!({"Err": ""}).into()
 }
 
@@ -94,6 +96,7 @@ pub async fn stop_logging(
         })
         .await
         .expect("Failed to enqueue StateHandlerMessage");
+    info!("[docker::stop_logging] send StopLogging message to StateHandler");
 
     json!({"Err": ""}).into()
 }

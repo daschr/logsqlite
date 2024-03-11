@@ -1,6 +1,6 @@
 use crate::config::Config;
 use chrono::DateTime;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 
 use crate::statehandler::StateHandlerMessage;
 use tokio::sync::mpsc::Sender;
@@ -205,7 +205,7 @@ impl Logger {
                         .await?;
                 }
                 Err(e) => {
-                    error!("Failed to read a protobuf message: {:?}", e);
+                    warn!("Failed to read a protobuf message: {:?}", e);
                     return Err(e);
                 }
             }
@@ -253,6 +253,7 @@ impl LoggerPool {
         let handle = tokio::spawn(async move {
             tx.send(StateHandlerMessage::LoggingStopped {
                 container_id: c_container_id,
+                fifo: f_path.clone(),
                 result: c_l.log(f_path, db_path, c_conf).await,
             })
             .await
