@@ -127,7 +127,7 @@ impl Logger {
         msg.reserve(dec_msg.encoded_len());
         dec_msg.encode(msg)?;
 
-        Ok(Some((dec_msg.time_nano as u64) / 1_000_000_000_u64))
+        Ok(Some(dec_msg.time_nano as u64))
     }
 
     async fn log(
@@ -185,13 +185,14 @@ impl Logger {
                             .await?;
 
                         info!(
-                            "reached {} entries with {} bytes size, ending current transacion ({:.2} lines/s)",
+                            "reached {} entries with {} bytes size, ending current transacion ({:.2} lines/s) for {}",
                             nb_entries,
                             acc_entries_size,
                             nb_entries as f64
                                 * (1_000_000f64
                                     / Instant::now().duration_since(no_entries_ts).as_micros()
-                                        as f64)
+                                        as f64),
+                            fifo.display()
                         );
 
                         no_entries_ts = Instant::now();
@@ -311,7 +312,9 @@ impl SqliteLogStream {
         let db_path = format!("{}/{}", dbs_path.display(), container_id);
         debug!("[SqliteLogStream] db_path: {}", &db_path);
         let mut con = SqliteConnectOptions::from_str(&format!("sqlite://{}", &db_path))?
+            .immutable(true)
             .read_only(true)
+            .serialized(false)
             .connect()
             .await?;
 
@@ -320,7 +323,7 @@ impl SqliteLogStream {
 
         if since.is_some() {
             if let Ok(time) = DateTime::parse_from_str(since.as_ref().unwrap().as_str(), "%+") {
-                let since = time.timestamp();
+                let since = time.timestamp_nanos();
 
                 cond.push_str(&format!(" AND ts>=?{}", parameters.len() + 1));
                 parameters.push(since as u64);
@@ -329,7 +332,7 @@ impl SqliteLogStream {
 
         if until.is_some() {
             if let Ok(time) = DateTime::parse_from_str(until.as_ref().unwrap().as_str(), "%+") {
-                let until = time.timestamp();
+                let until = time.timestamp_nanos();
 
                 cond.push_str(&format!(" AND ts<=?{}", parameters.len() + 1));
                 parameters.push(until as u64);
@@ -371,7 +374,6 @@ impl SqliteLogStream {
         }
 
         let stmt_s = format!("SELECT ROWID,message FROM logs {} LIMIT 1", cond);
-        debug!("stmt_s: {} params: {:?}", &stmt_s, &parameters);
 
         Ok(SqliteLogStream {
             stmt_s,

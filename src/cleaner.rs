@@ -111,11 +111,11 @@ impl LogCleaner {
 
                 debug!(
                     "cleanup: DELETE FROM logs WHERE ts < {} OR ROWID < {}",
-                    max_time.as_secs(),
+                    max_time.as_nanos(),
                     rowid
                 );
                 sqlx::query("DELETE FROM logs WHERE ts < ?1 OR ROWID < ?2")
-                    .bind(max_time.as_secs() as i64)
+                    .bind(max_time.as_nanos() as i64)
                     .bind(rowid as i64)
                     .execute(con)
                     .await?;
@@ -129,10 +129,10 @@ impl LogCleaner {
 
                 debug!(
                     "cleanup: DELETE FROM logs WHERE ts < {}",
-                    max_time.as_secs()
+                    max_time.as_nanos()
                 );
                 sqlx::query("DELETE FROM logs WHERE ts < ?1")
-                    .bind(max_time.as_secs() as i64)
+                    .bind(max_time.as_nanos() as i64)
                     .execute(con)
                     .await?;
             }
