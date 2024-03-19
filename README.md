@@ -3,7 +3,7 @@
 # LogSQlite
 Logging driver plugin for fast querying on huge logs.
 
-Ever had to query container logs containing thousands of lines using `docker logs --since <date> --until <data> <your container>` and experienced it's ridiculously slow seek time?<br>
+Ever had to query container logs containing thousands of lines using `docker logs --since <date> --until <data> <your container>` and experienced it's ridiculously long seek time?<br>
 But you don't want to setup a whole log management platform?
 
 *Then you may use this plugin!*
