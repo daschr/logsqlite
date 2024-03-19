@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, LogConfig};
 use crate::logger::SqliteLogStream;
 use crate::statehandler::StateHandlerMessage;
 
@@ -67,6 +67,13 @@ pub async fn start_logging(
         .send(StateHandlerMessage::StartLogging {
             container_id: conf.Info.ContainerID.clone(),
             fifo: PathBuf::from(conf.File.as_str()),
+            log_conf: match LogConfig::try_from(&conf.Info.Config) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to parse config: {:?}: {:?}", conf.Info.Config, e);
+                    return json!({"Err": e}).into();
+                }
+            },
         })
         .await
         .expect("failed to enqueue StateHandlerMessage");

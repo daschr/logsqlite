@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Config, LogConfig};
 use chrono::DateTime;
 use log::{debug, error, info, warn};
 
@@ -134,7 +134,7 @@ impl Logger {
         &self,
         fifo: PathBuf,
         db_path: PathBuf,
-        config: Arc<Config>,
+        log_conf: LogConfig,
     ) -> Result<(), LoggerError> {
         let mut dbcon =
             SqliteConnectOptions::from_str(&format!("sqlite://{}", &db_path.display()))?
@@ -163,7 +163,7 @@ impl Logger {
         while !*self.exit.read().await {
             debug!("read_protobuf from {}...", fifo.display());
             match self
-                .read_protobuf(&mut fd, &mut message, config.message_read_timeout)
+                .read_protobuf(&mut fd, &mut message, log_conf.message_read_timeout)
                 .await
             {
                 Ok(Some(ts)) => {
@@ -177,8 +177,8 @@ impl Logger {
                     nb_entries += 1;
                     acc_entries_size += message.len();
 
-                    if nb_entries >= config.max_lines_per_tx
-                        || acc_entries_size >= config.max_size_per_tx
+                    if nb_entries >= log_conf.max_lines_per_tx
+                        || acc_entries_size >= log_conf.max_size_per_tx
                     {
                         sqlx::query("END TRANSACTION;BEGIN TRANSACTION;")
                             .execute(&mut dbcon)
@@ -243,6 +243,7 @@ impl LoggerPool {
         &self,
         container_id: &str,
         fifo_path: PathBuf,
+        log_conf: LogConfig,
         tx: Sender<StateHandlerMessage>,
     ) {
         let logger = Arc::new(Logger::new());
@@ -251,7 +252,6 @@ impl LoggerPool {
 
         let f_path = fifo_path.clone();
         let c_l = logger.clone();
-        let c_conf = self.config.clone();
 
         let c_container_id = container_id.to_string();
 
@@ -259,7 +259,7 @@ impl LoggerPool {
             tx.send(StateHandlerMessage::LoggingStopped {
                 container_id: c_container_id,
                 fifo: f_path.clone(),
-                result: c_l.log(f_path, db_path, c_conf).await,
+                result: c_l.log(f_path, db_path, log_conf).await,
             })
             .await
             .expect("Could not enqueue StateHandlerMessage");
@@ -323,7 +323,9 @@ impl SqliteLogStream {
 
         if since.is_some() {
             if let Ok(time) = DateTime::parse_from_str(since.as_ref().unwrap().as_str(), "%+") {
-                let since = time.timestamp_nanos();
+                let since = time
+                    .timestamp_nanos_opt()
+                    .expect("timestamp in nanosecs does not fit in i64 anymore");
 
                 cond.push_str(&format!(" AND ts>=?{}", parameters.len() + 1));
                 parameters.push(since as u64);
@@ -332,7 +334,9 @@ impl SqliteLogStream {
 
         if until.is_some() {
             if let Ok(time) = DateTime::parse_from_str(until.as_ref().unwrap().as_str(), "%+") {
-                let until = time.timestamp_nanos();
+                let until = time
+                    .timestamp_nanos_opt()
+                    .expect("timestamp in nanosecs does not fit in i64 anymore");
 
                 cond.push_str(&format!(" AND ts<=?{}", parameters.len() + 1));
                 parameters.push(until as u64);

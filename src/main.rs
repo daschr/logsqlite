@@ -30,9 +30,16 @@ async fn normalize_dockerjson<B>(mut req: Request<B>) -> Request<B> {
 
 #[tokio::main]
 async fn main() -> Result<(), config::ParsingError> {
-    simple_logger::init_with_level(
-        env::var("DEBUG").map_or_else(|_| log::Level::Info, |_| log::Level::Debug),
-    )
+    simple_logger::init_with_level(env::var("DEBUG").map_or_else(
+        |_| log::Level::Info,
+        |s| {
+            if matches!(s.to_lowercase().as_str(), "true" | "1") {
+                log::Level::Debug
+            } else {
+                log::Level::Info
+            }
+        },
+    ))
     .expect("could not set loglevel");
 
     let args: Vec<String> = env::args().collect();
@@ -63,20 +70,18 @@ async fn main() -> Result<(), config::ParsingError> {
             .expect("Failed to create ApiState"),
     );
 
-    if state.cleaner.is_some() {
-        let cleaner = state.cleaner.as_ref().unwrap().clone();
-        let cleanup_interval = conf.cleanup_interval.clone();
-        task::spawn(async move {
-            match cleaner.run(cleanup_interval).await {
-                Ok(()) => {
-                    error!("Cleaner exited!");
-                }
-                Err(e) => {
-                    error!("Error running cleaner: {:?}", e);
-                }
+    let cleaner = state.cleaner.clone();
+    let cleanup_interval = conf.cleanup_interval.clone();
+    task::spawn(async move {
+        match cleaner.run(cleanup_interval).await {
+            Ok(()) => {
+                error!("Cleaner exited!");
             }
-        });
-    }
+            Err(e) => {
+                error!("Error running cleaner: {:?}", e);
+            }
+        }
+    });
 
     if let Err(e) = state_handler.replay_state().await {
         eprintln!("Failed to replay state: {:?}", e);

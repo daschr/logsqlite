@@ -1,4 +1,7 @@
 use configparser::ini::Ini;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::num::ParseIntError;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -7,12 +10,18 @@ pub struct Config {
     pub unix_socket_path: PathBuf,
     pub databases_dir: PathBuf,
     pub state_database: PathBuf,
+    pub cleanup_interval: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogConfig {
     pub max_lines_per_tx: u64,
     pub max_size_per_tx: usize, // bytes
     pub message_read_timeout: Duration,
     pub cleanup_age: Option<Duration>,
     pub cleanup_max_lines: Option<u64>,
     pub cleanup_interval: Duration,
+    pub delete_when_stopped: bool,
 }
 
 #[allow(unused)]
@@ -21,7 +30,7 @@ pub enum ConfigSource<T> {
     Text(T),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub enum ParsingError {
     IniError(String),
     ConfError(String),
@@ -30,6 +39,12 @@ pub enum ParsingError {
 impl From<String> for ParsingError {
     fn from(value: String) -> Self {
         ParsingError::IniError(value)
+    }
+}
+
+impl From<ParseIntError> for ParsingError {
+    fn from(value: ParseIntError) -> Self {
+        ParsingError::ConfError(value.to_string())
     }
 }
 
@@ -144,23 +159,6 @@ impl TryFrom<ConfigSource<String>> for Config {
                     )))
                 }
             },
-            message_read_timeout: Duration::from_millis(
-                config
-                    .getuint("general", "message_read_timeout")?
-                    .unwrap_or(100),
-            ),
-            max_lines_per_tx: config
-                .getuint("general", "max_lines_per_tx")?
-                .unwrap_or(10_000),
-            max_size_per_tx: match config.get("general", "max_size_per_tx") {
-                Some(s) => parse_si_prefixed_size(s.as_str())?,
-                None => 1024 * 1024 * 20,
-            },
-            cleanup_age: match config.get("cleanup", "age") {
-                Some(s) => Some(parse_as_duration(s.as_str())?),
-                None => None,
-            },
-            cleanup_max_lines: config.getuint("cleanup", "max_lines")?,
             cleanup_interval: config
                 .getuint("cleanup", "interval")?
                 .map(Duration::from_secs)
@@ -168,5 +166,66 @@ impl TryFrom<ConfigSource<String>> for Config {
         };
 
         Ok(c)
+    }
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        LogConfig {
+            max_lines_per_tx: 10_000,
+            max_size_per_tx: 10 * 1024 * 1024,
+            message_read_timeout: Duration::from_millis(100),
+            cleanup_age: None,
+            cleanup_max_lines: None,
+            cleanup_interval: Duration::from_secs(10 * 60),
+            delete_when_stopped: true,
+        }
+    }
+}
+
+impl TryFrom<&Option<HashMap<String, String>>> for LogConfig {
+    type Error = ParsingError;
+
+    fn try_from(cust_conf: &Option<HashMap<String, String>>) -> Result<Self, Self::Error> {
+        let mut conf = LogConfig::default();
+
+        if cust_conf.is_none() {
+            return Ok(conf);
+        }
+
+        let cust_conf = cust_conf.as_ref().unwrap();
+        for (opt, val) in cust_conf.iter() {
+            match opt.as_str() {
+                "message_read_timeout" => {
+                    conf.message_read_timeout = Duration::from_millis(val.parse::<u64>()?);
+                }
+                "max_lines_per_tx" => {
+                    conf.max_lines_per_tx = val.parse::<u64>()?;
+                }
+                "max_size_per_tx" => {
+                    conf.max_size_per_tx = parse_si_prefixed_size(val)?;
+                }
+                "cleanup_age" => {
+                    conf.cleanup_age = Some(parse_as_duration(val)?);
+                }
+                "cleanup_max_lines" => {
+                    conf.cleanup_max_lines = Some(val.parse::<u64>()?);
+                }
+                "delete_when_stopped" => {
+                    conf.delete_when_stopped = match val.to_lowercase().as_str() {
+                        "true" => true,
+                        "false" => false,
+                        _ => {
+                            return Err(ParsingError::ConfError(String::from(
+                                "delete_when_stopped is neither \"true\" or \"false\"",
+                            )));
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        Ok(conf)
     }
 }

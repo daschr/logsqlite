@@ -6,65 +6,41 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::{sync::RwLock, time};
 
+use crate::config::LogConfig;
+
 #[derive(Clone)]
 pub struct LogCleaner {
     fifos: Arc<RwLock<HashMap<PathBuf, String>>>,
-    containers: Arc<RwLock<HashMap<String, usize>>>,
+    containers: Arc<RwLock<HashMap<String, LogConfig>>>,
     dbs_path: String,
-    cleanup_age: Option<Duration>,
-    cleanup_max_lines: Option<u64>,
 }
 
 impl LogCleaner {
-    pub fn new(
-        dbs_path: String,
-        cleanup_age: Option<Duration>,
-        cleanup_max_lines: Option<u64>,
-    ) -> Self {
-        if cleanup_age.is_none() && cleanup_max_lines.is_none() {
-            panic!("cleanup_age and cleanup_max_lines cannot be both None!");
-        }
-
+    pub fn new(dbs_path: String) -> Self {
         LogCleaner {
             fifos: Arc::new(RwLock::new(HashMap::new())),
             containers: Arc::new(RwLock::new(HashMap::new())),
             dbs_path,
-            cleanup_age,
-            cleanup_max_lines,
         }
     }
 
-    pub async fn add(&self, container_id: &str, fifo: PathBuf) {
+    pub async fn add(&self, container_id: &str, fifo: PathBuf, log_conf: LogConfig) {
         self.fifos
             .write()
             .await
             .insert(fifo, container_id.to_string());
 
         let mut map = self.containers.write().await;
-
-        if let Some(v) = map.get_mut(container_id) {
-            *v += 1;
-        } else {
-            map.insert(container_id.to_string(), 1usize);
-        }
+        map.insert(container_id.to_string(), log_conf);
     }
 
-    pub async fn remove(&self, fifo: &Path) {
-        let container_id: String = match self.fifos.read().await.get(fifo).cloned() {
+    pub async fn remove(&self, fifo: &Path) -> Option<LogConfig> {
+        let container_id: String = match self.fifos.write().await.remove(fifo) {
             Some(v) => v,
-            None => return,
+            None => return None,
         };
 
-        let mut map = self.containers.write().await;
-
-        if let Some(v) = map.get_mut(&container_id) {
-            if *v > 1 {
-                *v -= 1;
-                return;
-            }
-        }
-
-        map.remove(&container_id);
+        self.containers.write().await.remove(&container_id)
     }
 
     async fn get_first_tail_rowid(
@@ -98,8 +74,12 @@ impl LogCleaner {
         Ok(rowid)
     }
 
-    async fn cleanup_db(&self, con: &mut SqliteConnection) -> Result<(), sqlx::Error> {
-        match (self.cleanup_age, self.cleanup_max_lines) {
+    async fn cleanup_db(
+        &self,
+        log_conf: &LogConfig,
+        con: &mut SqliteConnection,
+    ) -> Result<(), sqlx::Error> {
+        match (log_conf.cleanup_age, log_conf.cleanup_max_lines) {
             (Some(cleanup_age), Some(max_lines)) => {
                 let rowid = Self::get_first_tail_rowid(con, max_lines as u64).await?;
 
@@ -154,10 +134,10 @@ impl LogCleaner {
     pub async fn run(&self, cleanup_interval: Duration) -> Result<(), sqlx::Error> {
         loop {
             info!("starting cleanup");
-            for container in self.containers.read().await.keys() {
+            for (container, log_conf) in self.containers.read().await.iter() {
                 debug!(
                     "[cleanup] cleaning up container: {}, max_age: {:?} max_lines: {:?}",
-                    container, self.cleanup_age, self.cleanup_max_lines
+                    container, log_conf.cleanup_age, log_conf.cleanup_max_lines
                 );
                 let db_url = format!("sqlite://{}/{}", self.dbs_path, container);
                 match SqliteConnection::connect(&db_url).await {
@@ -165,7 +145,7 @@ impl LogCleaner {
                         error!("[cleanup] failed to open connection: {:?}", e);
                     }
                     Ok(mut con) => {
-                        if let Err(e) = self.cleanup_db(&mut con).await {
+                        if let Err(e) = self.cleanup_db(&log_conf, &mut con).await {
                             error!("[cleanup] could not cleanup {}: {:?}", container, e);
                         }
                     }
