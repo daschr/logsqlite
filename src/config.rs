@@ -176,7 +176,7 @@ impl Default for LogConfig {
             max_size_per_tx: 10 * 1024 * 1024,
             message_read_timeout: Duration::from_millis(100),
             cleanup_age: None,
-            cleanup_max_lines: None,
+            cleanup_max_lines: Some(10_000_000),
             cleanup_interval: Duration::from_secs(10 * 60),
             delete_when_stopped: true,
         }

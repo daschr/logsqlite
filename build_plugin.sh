@@ -10,4 +10,4 @@ docker export "$id" | sudo tar -x -C plugin/rootfs
 
 docker rm -vf "$id"
 
-docker plugin create logsqlite ./plugin/
+docker plugin create daschr/logsqlite ./plugin/
