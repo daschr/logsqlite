@@ -312,7 +312,6 @@ impl SqliteLogStream {
         let db_path = format!("{}/{}", dbs_path.display(), container_id);
         debug!("[SqliteLogStream] db_path: {}", &db_path);
         let mut con = SqliteConnectOptions::from_str(&format!("sqlite://{}", &db_path))?
-            .immutable(true)
             .read_only(true)
             .serialized(false)
             .connect()
