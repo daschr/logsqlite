@@ -13,7 +13,7 @@ serde = {version = "1.0.183", features = ["derive"]}
 hyperlocal = "0.8"
 hyper = "0.14.27"
 tokio = {version = "1.29.1", features = ["fs", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
-chrono = "0.4.26"
+chrono = "0.4.35"
 bytes = "1"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 prost = { version= "0.12" }
