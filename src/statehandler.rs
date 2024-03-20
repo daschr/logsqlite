@@ -192,7 +192,7 @@ impl StateHandler {
 
     pub async fn replay_state(&mut self) -> Result<(), sqlx::Error> {
         let mut stream = sqlx::query_as::<Sqlite, (String, String, Vec<u8>)>(
-            "SELECT container_id, fifo FROM active_fetches",
+            "SELECT container_id, fifo, log_conf FROM active_fetches",
         )
         .fetch(&mut (self.dbcon));
 
